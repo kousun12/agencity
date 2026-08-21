@@ -20,22 +20,29 @@ async function readLine(stream: ReadableStream<Uint8Array>): Promise<string> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let text = "";
-  const deadline = Date.now() + 10_000;
+  const timedOut = Symbol("observer-url-timeout");
   try {
-    while (Date.now() < deadline) {
-      const result = await Promise.race([
-        reader.read(),
-        Bun.sleep(250).then(() => ({ done: false as const, value: undefined })),
-      ]);
-      if (result.value) text += decoder.decode(result.value, { stream: true });
-      const newline = text.indexOf("\n");
-      if (newline >= 0) return text.slice(0, newline);
-      if (result.done) break;
+    const reading = (async (): Promise<string> => {
+      while (true) {
+        const result = await reader.read();
+        if (result.value) text += decoder.decode(result.value, { stream: true });
+        const newline = text.indexOf("\n");
+        if (newline >= 0) return text.slice(0, newline);
+        if (result.done) throw new Error(`Observer exited before printing a URL: ${text}`);
+      }
+    })();
+    const result = await Promise.race([
+      reading,
+      Bun.sleep(10_000).then(() => timedOut),
+    ]);
+    if (typeof result !== "string") {
+      await reader.cancel("Observer URL read timed out");
+      throw new Error(`Observer did not print a URL: ${text}`);
     }
+    return result;
   } finally {
     reader.releaseLock();
   }
-  throw new Error(`Observer did not print a URL: ${text}`);
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -102,4 +109,58 @@ describe("observe source-checkout command", () => {
     expect(stderr).toContain(`Observer port ${port} is unavailable`);
     expect(await exists(join(workspace, ".agencity"))).toBe(false);
   });
+
+  test("loads every checked-in asset through an isolated linked executable", async () => {
+    const workspace = await freshWorkspace();
+    const installation = join(workspace, "bun-install");
+    const linked = Bun.spawn([process.execPath, "link", "--cwd", repositoryRoot], {
+      env: { ...process.env, BUN_INSTALL: installation },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [linkCode, linkError] = await Promise.all([
+      linked.exited,
+      new Response(linked.stderr).text(),
+    ]);
+    expect(linkCode, linkError).toBe(0);
+    const child = Bun.spawn([
+      join(installation, "bin", "agencity"),
+      "observe",
+      "--workspace",
+      workspace,
+    ], {
+      cwd: workspace,
+      env: { ...process.env, BUN_INSTALL: installation },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      let line: string;
+      try {
+        line = await readLine(child.stdout);
+      } catch (error) {
+        child.kill("SIGTERM");
+        const [, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stderr).text(),
+        ]);
+        throw new Error(`${String(error)}\nlinked observer stderr:\n${stderr}`);
+      }
+      const origin = line.slice(0, line.indexOf("/#token="));
+      for (const [path, contentType] of [
+        ["/", "text/html"],
+        ["/app.js", "text/javascript"],
+        ["/app.css", "text/css"],
+      ] as const) {
+        const asset = await fetch(`${origin}${path}`);
+        expect(asset.status).toBe(200);
+        expect(asset.headers.get("content-type")).toContain(contentType);
+        expect((await asset.text()).length).toBeGreaterThan(100);
+      }
+    } finally {
+      child.kill("SIGTERM");
+      expect(await child.exited).toBe(0);
+    }
+    expect(await exists(join(workspace, ".agencity"))).toBe(false);
+  }, 30_000);
 });

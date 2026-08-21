@@ -118,7 +118,11 @@ function decodeRootCursor(cursor: string | null | undefined, generation: string)
     }
     return Number(parsed.offset);
   } catch {
-    throw new Error("Invalid observer root pagination cursor");
+    throw new ObserverControllerError(
+      "INVALID_CURSOR",
+      "Observer root pagination cursor is invalid",
+      400,
+    );
   }
 }
 
@@ -225,8 +229,8 @@ export class ObserverController {
     return () => this.#listeners.delete(listener);
   }
 
-  snapshot(rootCursor?: string | null): ObserverBrowserSnapshot {
-    const rootsPage = this.rootPage(rootCursor);
+  snapshot(rootCursor?: string | null, rootsLimit?: number): ObserverBrowserSnapshot {
+    const rootsPage = this.rootPage(rootCursor, rootsLimit);
     return {
       version: OBSERVER_PROTOCOL,
       availability: this.#availability,
@@ -245,11 +249,14 @@ export class ObserverController {
     };
   }
 
-  rootPage(cursor?: string | null): ObserverRootPage {
+  rootPage(cursor?: string | null, requestedLimit = ROOT_PAGE_ITEMS): ObserverRootPage {
     const generation = this.#generation?.generation ?? this.#detachedGeneration;
     const offset = decodeRootCursor(cursor, generation);
-    const decorated = this.#roots.map(root => ({ ...root, selectable: selectable(root) }));
-    let items = decorated.slice(offset, offset + ROOT_PAGE_ITEMS);
+    const decorated = this.#roots
+      .filter(selectable)
+      .map(root => ({ ...root, selectable: true }));
+    const limit = Math.max(1, Math.min(ROOT_PAGE_ITEMS, Math.floor(requestedLimit)));
+    let items = decorated.slice(offset, offset + limit);
     let truncated = offset + items.length < decorated.length;
     while (serializedUtf8Bytes(items) > ROOT_PAGE_BYTES && items.length > 0) {
       items = items.slice(0, -1);
@@ -258,7 +265,7 @@ export class ObserverController {
     const nextOffset = offset + items.length;
     return {
       items,
-      selectableCount: decorated.filter(root => root.selectable).length,
+      selectableCount: decorated.length,
       nextCursor: nextOffset < decorated.length
         ? encodeRootCursor(generation, nextOffset)
         : null,
@@ -291,11 +298,23 @@ export class ObserverController {
     }
     const snapshot = this.#family?.routes.get(observerRouteKey(input.route));
     if (!snapshot) throw new ObserverControllerError("ROUTE_UNAVAILABLE", "Observer route is unavailable", 404);
-    const page = deriveObserverDetailPage(snapshot, input.section as ObserverDetailSection, {
-      ...(input.limit === undefined ? {} : { limit: input.limit }),
-      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-      ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
-    });
+    let page;
+    try {
+      page = deriveObserverDetailPage(snapshot, input.section as ObserverDetailSection, {
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+        ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+        ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "Invalid observer detail pagination cursor") {
+        throw new ObserverControllerError(
+          "INVALID_CURSOR",
+          "Observer detail pagination cursor is invalid",
+          400,
+        );
+      }
+      throw error;
+    }
     if (input.itemId && page.items.length === 0) {
       throw new ObserverControllerError("ITEM_UNAVAILABLE", "Observer detail item is unavailable", 404);
     }
@@ -381,7 +400,6 @@ export class ObserverController {
       this.#selectedRoot = null;
       this.#family = null;
       this.#generation = null;
-      this.#detachedGeneration = generationId();
       this.#setAvailability("connected", candidates.length
         ? "Select one root family"
         : "No selectable root family is available");
@@ -429,6 +447,9 @@ export class ObserverController {
     const generation = this.#generation;
     if (!source || !generation) return;
     const key = observerRouteKey(route);
+    this.#routeStreams.get(key)?.abort(
+      new DOMException("Observer route stream replaced", "AbortError"),
+    );
     const controller = new AbortController();
     this.#routeStreams.set(key, controller);
     this.#lastRouteActivity.set(key, this.#now());

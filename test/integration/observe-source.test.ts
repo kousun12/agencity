@@ -55,6 +55,8 @@ function protocolServer(input: {
   readonly capabilities?: Record<string, unknown>;
   readonly token?: string;
   readonly paths?: string[];
+  readonly roots?: unknown;
+  readonly healthAbort?: { aborted: boolean };
 } = {}): Bun.Server<unknown> {
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -66,6 +68,14 @@ function protocolServer(input: {
         return Response.json({ error: { code: "UNAUTHORIZED", message: "no" } }, { status: 401 });
       }
       if (url.pathname === "/health") {
+        if (input.healthAbort) {
+          return new Promise<Response>(resolve => {
+            request.signal.addEventListener("abort", () => {
+              input.healthAbort!.aborted = true;
+              resolve(Response.json({ error: "aborted" }, { status: 499 }));
+            }, { once: true });
+          });
+        }
         return Response.json({
           ok: true,
           authenticated: true,
@@ -89,7 +99,7 @@ function protocolServer(input: {
         });
       }
       if (url.pathname === "/service/agents") {
-        return Response.json([{
+        return Response.json(input.roots ?? [{
           sessionId: "root",
           branchId: "main",
           name: "Root",
@@ -100,6 +110,11 @@ function protocolServer(input: {
       }
       if (url.pathname === "/sessions/root/snapshot") {
         return Response.json({ cursor: "1", state: {} });
+      }
+      if (url.pathname === "/sessions/root/stream") {
+        return new Response(": connected\n\n", {
+          headers: { "Content-Type": "text/event-stream" },
+        });
       }
       return Response.json({ error: { code: "NOT_FOUND", message: "no" } }, { status: 404 });
     },
@@ -168,9 +183,76 @@ describe("AgentClient observer source adapter", () => {
     if (connected.kind !== "connected") return;
     const roots = await connected.source.roots();
     expect(roots).toHaveLength(1);
-    expect(paths).toEqual(["/health", "/capabilities", "/service/agents"]);
+    await expect(connected.source.loadRouteSnapshot({
+      sessionId: "root",
+      branchId: "main",
+    })).rejects.toThrow("snapshot identity is invalid");
+    const streamAbort = new AbortController();
+    await connected.source.streamRoute(
+      { sessionId: "root", branchId: "main" },
+      "1",
+      { onComment() {}, onEvent() {}, onProgress() {} },
+      streamAbort.signal,
+    );
+    expect(paths).toEqual([
+      "/health",
+      "/capabilities",
+      "/service/agents",
+      "/sessions/root/snapshot",
+      "/sessions/root/stream",
+    ]);
     expect(paths).not.toContain("/product/sessions");
     connected.source.close();
+  });
+
+  test("rejects malformed managed root rows", async () => {
+    const root = await workspace();
+    const rawToken = Buffer.alloc(32, 5).toString("base64url");
+    const server = protocolServer({
+      token: rawToken,
+      roots: [{
+        sessionId: "root",
+        branchId: "main",
+        name: "Root",
+        status: "idle",
+        worker: "idle",
+        unresolvedWork: -1,
+      }],
+    });
+    await manifest(root, {
+      url: `http://127.0.0.1:${server.port}`,
+      bearerToken: rawToken,
+    });
+    const connected = await agentClientObserverSourceFactory.connect({
+      workspaceRoot: root,
+      workspaceId,
+    });
+    expect(connected.kind).toBe("connected");
+    if (connected.kind !== "connected") return;
+    await expect(connected.source.roots()).rejects.toThrow("Managed root row is invalid");
+    connected.source.close();
+  });
+
+  test("cancels a pending managed read when its caller times out", async () => {
+    const root = await workspace();
+    const rawToken = Buffer.alloc(32, 6).toString("base64url");
+    const healthAbort = { aborted: false };
+    const server = protocolServer({ token: rawToken, healthAbort });
+    await manifest(root, {
+      url: `http://127.0.0.1:${server.port}`,
+      bearerToken: rawToken,
+    });
+    const started = Date.now();
+    const connected = await agentClientObserverSourceFactory.connect({
+      workspaceRoot: root,
+      workspaceId,
+      signal: AbortSignal.timeout(25),
+    });
+    expect(connected.kind).toBe("service_stale");
+    expect(Date.now() - started).toBeLessThan(1_000);
+    const abortDeadline = Date.now() + 500;
+    while (!healthAbort.aborted && Date.now() < abortDeadline) await Bun.sleep(5);
+    expect(healthAbort.aborted).toBe(true);
   });
 
   test("rejects malformed managed snapshot projections before family derivation", async () => {

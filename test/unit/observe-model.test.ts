@@ -257,6 +257,39 @@ describe("observer family discovery", () => {
     expect(family.routes.get(observerRouteKey(childRoutes[2]!))?.availability).toBe("route_unavailable");
     expect(family.routes.get(observerRouteKey(childRoutes[2]!))?.unavailableReason).toBe("snapshot_unavailable");
   });
+
+  test("stops at 64 routes without inventing an omitted-route count", async () => {
+    const root = { sessionId: "root", branchId: "main" };
+    const children = Array.from({ length: 70 }, (_, index) => ({
+      sessionId: `child-${index.toString().padStart(2, "0")}`,
+      branchId: "main",
+    }));
+    const tasks = Object.fromEntries(children.map((child, index) => {
+      const value = task(`task-${index}`, root, child);
+      return [value.id, value];
+    }));
+    const source: ObserverSnapshotSource = {
+      async loadRouteSnapshot(route) {
+        const value = route.sessionId === "root"
+          ? state("root", "main", {
+              tasks,
+              appliedEventIds: ["created-root", ...Object.values(tasks).map(value => value.eventId)],
+            })
+          : state(route.sessionId, route.branchId);
+        return { cursor: value.cursor, state: value };
+      },
+    };
+
+    const family = await discoverObserverFamily(root, source);
+    expect(family.routes.size).toBe(OBSERVER_BOUNDS.familyRoutes);
+    expect(family.truncated).toBe(true);
+    const overview = deriveObserverFamilyOverview(family);
+    expect(overview.nodes).toHaveLength(OBSERVER_BOUNDS.familyRoutes);
+    expect(overview.truncation).toMatchObject({
+      familyRoutes: true,
+      exactOmittedRouteCount: null,
+    });
+  });
 });
 
 describe("observer projections", () => {
@@ -307,6 +340,54 @@ describe("observer projections", () => {
     }]);
     const detail = deriveObserverDetailPage(routeSnapshot(root, rootState), "mailbox");
     expect(detail.items.map((value) => value.id)).toEqual(["message"]);
+  });
+
+  test("retains failed mailbox provenance and reports conflicting copies", () => {
+    const root = { sessionId: "root", branchId: "main" };
+    const child = { sessionId: "child", branchId: "main" };
+    const unrelated = { sessionId: "other", branchId: "main" };
+    const rootState = state("root", "main", {
+      mailbox: {
+        failed: mailbox("failed", root, child),
+        unrelated: mailbox("unrelated", unrelated, child),
+      },
+    });
+    const childState = state("child", "main", {
+      mailbox: {
+        failed: mailbox("failed", root, child, {
+          direction: "inbound",
+          content: "conflicting retained copy",
+          delivered: true,
+          receiptStatus: "failed",
+          error: "delivery failed",
+          eventId: "mail-failed-outcome",
+        }),
+      },
+    });
+    const family: InternalObserverFamily = {
+      root,
+      routes: new Map([
+        [observerRouteKey(root), routeSnapshot(root, rootState)],
+        [observerRouteKey(child), routeSnapshot(child, childState)],
+      ]),
+      edges: [],
+      truncated: false,
+      edgesTruncated: false,
+    };
+
+    expect(aggregateObserverMailbox(family)).toEqual([{
+      mailboxMessageId: "failed",
+      from: root,
+      to: child,
+      taskId: null,
+      kind: "message",
+      lifecycle: "failed",
+      stages: ["sent", "delivered", "failed"],
+      conflict: true,
+      itemEventIds: ["mail-failed-sent", "mail-failed-outcome"],
+      itemEventIdsTruncated: false,
+      omittedItemEventIdCount: 0,
+    }]);
   });
 
   test("derives bounded overview and explicit attention states", () => {
@@ -361,6 +442,125 @@ describe("observer projections", () => {
     expect(overview.nodes[0]?.activityReason).toBe("budget_exceeded");
     expect(serializedUtf8Bytes(overview)).toBeLessThanOrEqual(OBSERVER_BOUNDS.familySnapshotBytes);
   });
+
+  test("distinguishes working, idle, attention, ended, and unavailable activity", () => {
+    expect(deriveObserverRouteStatus(state("idle", "main"))).toEqual({
+      activity: "idle",
+      activityReason: null,
+    });
+    expect(deriveObserverRouteStatus(state("working", "main", { status: "running" }))).toEqual({
+      activity: "working",
+      activityReason: null,
+    });
+    expect(deriveObserverRouteStatus(state("attention", "main", {
+      budget: { limits: {}, tokens: 0, costUsd: 0, turns: 0, wallTimeMs: 0, exceeded: true },
+    }))).toEqual({
+      activity: "attention",
+      activityReason: "budget_exceeded",
+    });
+    expect(deriveObserverRouteStatus(state("ended", "main", { status: "archived" }))).toEqual({
+      activity: "ended",
+      activityReason: "archived",
+    });
+    expect(deriveObserverRouteStatus(null)).toEqual({
+      activity: "unavailable",
+      activityReason: "missing_state",
+    });
+  });
+
+  test("keeps raw content out of overview and bounds every lazy inspector section", () => {
+    const route = { sessionId: "root", branchId: "main" };
+    const rawCode = "RAW_CODE_SENTINEL";
+    const rawEffect = "RAW_EFFECT_SENTINEL";
+    const rawMessage = "RAW_MESSAGE_SENTINEL";
+    const rawArtifactBytes = "RAW_ARTIFACT_BYTES_SENTINEL";
+    const value = state("root", "main", {
+      messages: [{
+        id: "message",
+        role: "user",
+        content: rawMessage,
+        eventId: "message-event",
+        eventCursor: "2",
+        schemaVersion: EVENT_SCHEMA_VERSION,
+        modelCallId: null,
+      }],
+      cells: {
+        cell: {
+          id: "cell",
+          code: rawCode,
+          status: "committed",
+          attempts: 1,
+          logs: ["RAW_LOG_SENTINEL"],
+          logStreams: ["stdout"],
+          result: null,
+          eventId: "cell-event",
+        },
+      },
+      effects: {
+        effect: {
+          id: "effect",
+          executor: "shell",
+          operation: "run",
+          input: { secret: rawEffect },
+          origin: { kind: "runtime", requestId: "request" },
+          idempotencyKey: "effect",
+          idempotent: true,
+          attempts: 1,
+          status: "succeeded",
+          output: { hidden: rawArtifactBytes },
+          eventId: "effect-event",
+        },
+      },
+      mailbox: {
+        mailbox: mailbox("mailbox", route, route, { content: rawMessage }),
+      },
+      artifacts: {
+        artifact: {
+          artifactId: "artifact",
+          digest: "a".repeat(64),
+          mediaType: "application/octet-stream",
+          size: rawArtifactBytes.length,
+        },
+      },
+      appliedEventIds: [
+        "created-root",
+        "message-event",
+        "cell-event",
+        "effect-event",
+        "mail-mailbox-sent",
+      ],
+    });
+    const snapshot = routeSnapshot(route, value);
+    const family: InternalObserverFamily = {
+      root: route,
+      routes: new Map([[observerRouteKey(route), snapshot]]),
+      edges: [],
+      truncated: false,
+      edgesTruncated: false,
+    };
+    const overviewText = JSON.stringify(deriveObserverFamilyOverview(family));
+    for (const sentinel of [rawCode, rawEffect, rawMessage, rawArtifactBytes, "RAW_LOG_SENTINEL"]) {
+      expect(overviewText).not.toContain(sentinel);
+    }
+
+    const sections = [
+      "identity", "runs", "model_attempts", "cells", "effects", "tasks",
+      "mailbox", "budget", "goals", "gates", "artifacts", "terminal_outcomes",
+    ] as const;
+    for (const section of sections) {
+      const page = deriveObserverDetailPage(snapshot, section);
+      expect(page.items.length).toBeLessThanOrEqual(OBSERVER_BOUNDS.detailItems);
+      expect(serializedUtf8Bytes(page)).toBeLessThanOrEqual(OBSERVER_BOUNDS.detailPageBytes);
+    }
+    const artifacts = deriveObserverDetailPage(snapshot, "artifacts");
+    expect(artifacts.items[0]?.data).toEqual({
+      digest: "a".repeat(64),
+      mediaType: expect.any(Object),
+      size: rawArtifactBytes.length,
+      bytesAvailable: false,
+    });
+    expect(JSON.stringify(artifacts)).not.toContain(rawArtifactBytes);
+  });
 });
 
 describe("observer generations", () => {
@@ -401,6 +601,14 @@ describe("observer generations", () => {
     });
     expect(stale.kind).toBe("stale_generation");
     expect(stale.state).toBe(initial);
+    const staleInstance = applyObserverCommittedEvent(initial, {
+      generation: "generation-1",
+      managedInstanceId: "old-instance",
+      route,
+      event: statusEvent("status-2", "2"),
+    });
+    expect(staleInstance.kind).toBe("stale_generation");
+    expect(staleInstance.state).toBe(initial);
 
     const applied = applyObserverCommittedEvent(initial, {
       generation: "generation-1",

@@ -422,7 +422,17 @@
     const snapshot = asObject(firstValue(data, ["snapshot"], data));
     const nextGeneration = boundedText(firstValue(snapshot, ["generation", "observerGeneration"], state.generation), 256);
     const generationChanged = Boolean(nextGeneration && nextGeneration !== state.generation);
-    if (generationChanged) state.positions.clear();
+    if (generationChanged) {
+      state.positions.clear();
+      state.activities = [];
+      state.activityBytes = 0;
+      state.progress.clear();
+      state.events = [];
+      state.eventKeys.clear();
+      renderActivities();
+      renderEvents();
+      clearDetail();
+    }
     if (nextGeneration) state.generation = nextGeneration;
     state.sequence = boundedText(firstValue(snapshot, ["sequence", "observerSequence"], state.sequence), 64);
     state.instanceId = boundedText(firstValue(snapshot, ["managedInstanceId", "instanceId"], state.instanceId), 256);

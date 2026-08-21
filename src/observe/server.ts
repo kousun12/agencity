@@ -177,6 +177,9 @@ async function jsonBody(request: Request): Promise<Record<string, unknown>> {
   if (Buffer.byteLength(text, "utf8") > MAX_REQUEST_BODY_BYTES) {
     throw new ObserverControllerError("INVALID_BODY", "Observer request body is too large", 413);
   }
+  if (!jsonObjectKeysAreUnique(text)) {
+    throw new ObserverControllerError("INVALID_BODY", "Observer request body contains duplicate fields", 400);
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -187,6 +190,50 @@ async function jsonBody(request: Request): Promise<Record<string, unknown>> {
     throw new ObserverControllerError("INVALID_BODY", "Observer request body is invalid", 400);
   }
   return parsed as Record<string, unknown>;
+}
+
+function jsonObjectKeysAreUnique(text: string): boolean {
+  const stack: Array<Set<string> | null> = [];
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]!;
+    if (character === "{") {
+      stack.push(new Set());
+      continue;
+    }
+    if (character === "[") {
+      stack.push(null);
+      continue;
+    }
+    if (character === "}" || character === "]") {
+      stack.pop();
+      continue;
+    }
+    if (character !== '"') continue;
+    const start = index;
+    index += 1;
+    while (index < text.length) {
+      if (text[index] === "\\") {
+        index += 2;
+        continue;
+      }
+      if (text[index] === '"') break;
+      index += 1;
+    }
+    let next = index + 1;
+    while (next < text.length && /\s/.test(text[next]!)) next += 1;
+    if (text[next] !== ":") continue;
+    const objectKeys = stack.at(-1);
+    if (!objectKeys) continue;
+    let key: string;
+    try {
+      key = JSON.parse(text.slice(start, index + 1)) as string;
+    } catch {
+      continue;
+    }
+    if (objectKeys.has(key)) return false;
+    objectKeys.add(key);
+  }
+  return true;
 }
 
 function exactRoute(value: unknown): ObserverRoute {
@@ -215,6 +262,7 @@ function snapshotData(snapshot: ObserverBrowserSnapshot): ObserverBrowserSnapsho
 export async function startObserverServer(input: {
   readonly controller: ObserverController;
   readonly port: number;
+  readonly browserHeartbeatMs?: number;
 }): Promise<ObserverServer> {
   const bootstrapToken = token();
   const sessions = new Set<string>();
@@ -277,6 +325,7 @@ export async function startObserverServer(input: {
             release,
             streamClosers,
             request.signal,
+            input.browserHeartbeatMs ?? BROWSER_HEARTBEAT_MS,
           );
         }
 
@@ -284,10 +333,13 @@ export async function startObserverServer(input: {
         try {
           if (request.method === "GET" && url.pathname === "/api/bootstrap") {
             strictQuery(url, new Set(["rootsLimit", "rootsCursor"]));
-            if (url.searchParams.has("rootsLimit")) {
-              boundedInteger(url.searchParams.get("rootsLimit"), "rootsLimit", 1, 100);
-            }
-            return envelope(snapshotData(input.controller.snapshot(url.searchParams.get("rootsCursor"))));
+            const rootsLimit = url.searchParams.has("rootsLimit")
+              ? boundedInteger(url.searchParams.get("rootsLimit"), "rootsLimit", 1, 100)
+              : undefined;
+            return envelope(snapshotData(input.controller.snapshot(
+              url.searchParams.get("rootsCursor"),
+              rootsLimit,
+            )));
           }
           if (request.method === "POST" && url.pathname === "/api/family/select") {
             strictQuery(url, new Set());
@@ -374,6 +426,7 @@ function createBrowserStream(
   releaseAttachment: () => void,
   closers: Set<() => void>,
   requestSignal: AbortSignal,
+  browserHeartbeatMs: number,
 ): Response {
   let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
   let closed = false;
@@ -455,7 +508,7 @@ function createBrowserStream(
       });
       heartbeat = setInterval(() => {
         if (!enqueueRaw(": heartbeat\n\n")) resyncAndClose("replay_overflow");
-      }, BROWSER_HEARTBEAT_MS);
+      }, browserHeartbeatMs);
     },
     pull() {
       flush();
