@@ -2,7 +2,7 @@
 
 **Status:** Proposed  
 **Date:** August 19, 2026  
-**Corrected:** August 20, 2026
+**Corrected and rescoped:** August 20, 2026
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
 **Related plans:** [Ergonomic agent-family navigation](./2026-08-07-ergonomic-agent-family-navigation-plan.md) and [Workspace Agents view](./2026-08-08-workspace-agents-view-plan.md)
 
@@ -16,7 +16,7 @@ agencity observe
 
 It presents durable agents, parent-child delegation, mailbox lifecycles, runs, model actions, TypeScript cells, effects, goals, gates, budgets, and unresolved outcomes as bounded current state and live activity.
 
-The foreground `agencity observe` process owns only the observer HTTP server and disposable observer projections. It is a client of bounded, read-only managed-protocol views. It does not initialize an Agencity workspace, start or stop the managed workspace service, open LibSQL, execute work, mutate product selection, or become part of durable agent identity.
+The foreground `agencity observe` process owns only the observer HTTP server and disposable observer projections. It is a read-only client of the existing managed workspace protocol. It does not initialize an Agencity workspace, start or stop the managed workspace service, open LibSQL, execute work, mutate product selection, or become part of durable agent identity.
 
 The first version provides:
 
@@ -42,7 +42,9 @@ The first version provides:
 - The observer uses read-only workspace discovery before ordinary product bootstrap can initialize state or connect the managed service.
 - The managed Agencity protocol is the agent-state source boundary. Direct LibSQL or projection-table access is prohibited.
 - Service manifest and workspace identity files may be observed as owner-only discovery metadata. They are not agent-state read side channels.
-- The implementation adds bounded, read-only managed-protocol observation views. Raw `AgentState` snapshots are not sent to browser JavaScript and are not the family-graph source.
+- The observer consumes the existing managed protocol: authenticated health identity, capabilities, the roots listing, full branch snapshots, and per-branch committed-event streams. Version one adds no new managed observation routes.
+- Full `AgentState` values stay inside the observer process as disposable projection sources. Browser JavaScript receives only bounded observer DTOs and never a full `AgentState` serialization.
+- The one managed-protocol change in version one is a periodic comment heartbeat on the existing branch stream so a dead upstream connection is detectable. Existing stream clients already tolerate comment lines.
 - A process-local browser session cookie authenticates the observer web API and SSE stream. The managed-service bearer token never enters the browser.
 - Branch-fork topology is deferred. A route node may display its branch name, but version one does not discover or render branch-fork edges.
 
@@ -90,10 +92,10 @@ The first version provides:
 - **Family graph:** A disposable read-only graph of route nodes, delegation edges, and message lifecycles.
 - **Durable activity:** Metadata for a canonical event with its exact route, event ID, cursor, type, producer, and commit time.
 - **Provisional progress:** Cursorless, process-local effect progress that may be dropped and is never replayed as durable history.
-- **Managed observation view:** A versioned, bounded, read-only managed-protocol response designed for clients that must not load or forward a full `AgentState`.
+- **Observer DTO:** A versioned, bounded, read-only browser-facing response derived inside the observer process. It never contains a full `AgentState`.
 - **Observer generation:** A random process-local identifier for one coherent observer state. It changes on family selection, managed-instance replacement, and explicit resync.
 - **Observer sequence:** A process-local monotonically increasing SSE sequence within one observer generation. It supports browser catch-up but never replaces canonical route cursors.
-- **Observer projection:** Disposable in-memory family state derived from bounded managed observation snapshots and streams.
+- **Observer projection:** Disposable in-memory family state. For each loaded route it holds one full `AgentState` obtained from a branch snapshot and maintained by applying committed stream events with the pure domain reducer, the same pattern `AgentClient.watchBranch()` uses.
 
 ## State and availability model
 
@@ -103,7 +105,7 @@ The browser displays these states without collapsing them into generic unavailab
 - `service_stopped` — no managed-service manifest exists;
 - `service_stale` — a manifest exists but no matching live service can be established;
 - `service_conflict` — authenticated identity or execution authority is inconsistent;
-- `service_incompatible` — protocol, capability, or observation-view version is unsupported;
+- `service_incompatible` — the protocol version range or a required capability is unsupported;
 - `connecting` — the observer is validating one discovered managed instance;
 - `connected` — bounded snapshots and streams belong to one authenticated authoritative instance;
 - `resyncing` — the observer discarded one generation and is rebuilding from fresh snapshots;
@@ -144,7 +146,7 @@ The command accepts only observer-relevant product options:
 
 Task text, model options, execution configuration, storage overrides, sync configuration, and mutation options are rejected for `observe`. Observer discovery does not reconstruct a managed-service execution configuration and does not compare an observer-derived execution configuration hash.
 
-The existing discovery helpers do not satisfy these requirements: `observeManagedService()` compares an execution configuration hash, and `readServiceManifest()` may create missing metadata directories. The observer uses a strictly read-only manifest reader that never creates directories or files, retains the owner-only and `O_NOFOLLOW` validation patterns, and validates the service through authenticated identity and observation status rather than a configuration hash.
+The existing discovery helpers do not satisfy these requirements: `observeManagedService()` compares an execution configuration hash, and `readServiceManifest()` may create missing metadata directories. The observer uses a strictly read-only manifest reader that never creates directories or files, retains the owner-only and `O_NOFOLLOW` validation patterns, and validates the service through the existing authenticated health identity — workspace ID, instance ID, and supported protocol version range — rather than a configuration hash.
 
 ### Browser session
 
@@ -161,17 +163,13 @@ The bootstrap token may establish browser sessions only for the lifetime of the 
 
 ### Select one family
 
-The observer requests a paged managed root catalog. A selectable row satisfies all of these conditions:
-
-- `root === true`;
-- `initialBranch === true`;
-- status is neither `failed` nor `archived`.
+The observer requests the existing managed roots listing, which already contains only root initial-branch routes with their status. A selectable row is one whose status is neither `failed` nor `archived`.
 
 Behavior:
 
 - If exactly one selectable root exists, the observer selects it.
 - If zero or multiple selectable roots exist, the browser presents a selector.
-- Catalog pages contain at most 100 rows and 256 KiB and report the exact selectable-root count. Root enumeration uses durable session records; only root initial branches are projected to determine status, and non-root branch histories are never loaded.
+- The upstream roots listing is the existing unbounded managed route; its cost is accepted for the trusted-local first version. The observer sends the browser bounded selector pages of at most 100 rows and 256 KiB with the exact selectable-root count.
 - Selection is process-local and shared by authenticated tabs.
 - Selection never calls `POST /product/select` and never changes ordinary `agencity` resume selection.
 - A selection request carries the expected observer generation. A stale request is rejected.
@@ -207,11 +205,11 @@ The primary layout contains:
 - Failed, blocked, cancelled, budget-exceeded, unknown, stale, unavailable, truncated, and cancellation-pending states remain distinct.
 - Node positions remain stable within one observer generation.
 
-Live animation is presentational. Bounded managed snapshots, exact route cursors, and committed event metadata determine state.
+Live animation is presentational. Retained route states, exact route cursors, and committed events determine state.
 
 ### Inspectors and provenance
 
-The managed observation API exposes these paged sections for one selected route:
+The observer derives these paged inspector sections from the retained state of one selected route:
 
 - identity, parent, root, branch, model, active profile summary, and session status;
 - active and terminal runs with steps and typed outcomes;
@@ -240,10 +238,12 @@ The event rail is the exact-cursor view. Retained detail pages are current proje
 ```text
 Browser
   -> authenticated observer HTTP/SSE
-  -> bounded observer DTOs and disposable family projection
+  -> bounded observer DTOs
+  -> disposable family projection: full route states + pure domain reducer
   -> narrow read-only observer source
-  -> authenticated AgentClient observation methods
-  -> bounded managed observation snapshots, pages, and one family stream
+  -> authenticated AgentClient read methods
+  -> existing managed protocol: health, capabilities, roots listing,
+     branch snapshots, per-branch committed-event streams
   -> canonical events and deterministic runtime projections
 ```
 
@@ -263,53 +263,41 @@ The observer package does not import or construct:
 
 Only one adapter module may construct `AgentClient`. That adapter implements a narrow read-only interface. Observer server routes and browser DTO builders receive the narrow interface, never an unrestricted `AgentClient`.
 
+Observer modules may import `src/domain/` for types and the pure `reduceAgentState` reducer.
+
 `check:architecture` enforces:
 
 - observer UI and HTTP modules cannot import runtime, storage, LibSQL, executors, or product service ownership;
-- within `src/observe/` only, the observer source adapter may import `AgentClient`; existing CLI, TUI, and product-service imports of `AgentClient` remain valid and unchecked by this rule;
+- within `src/observe/` only, the observer source adapter module may import from `src/protocol/`; existing CLI, TUI, and product-service imports of `AgentClient` remain valid and unchecked by this rule. The rule is module-path based, matching the existing import-specifier checks in `scripts/check-architecture.ts`;
 - the adapter exposes only approved read methods;
 - checked-in web assets exist and resolve relative to `import.meta.url`;
 - observer browser assets contain no managed-service route, bearer-token field, or generic proxy mechanism.
 
-### Read-only managed observation contract
+### Managed protocol usage
 
-The implementation adds versioned, bounded, read-only protocol methods and corresponding `AgentClient` methods:
+The observer uses only existing authenticated managed-protocol reads:
 
-- service observation identity, capability, and execution-authority status;
-- paged selectable initial-root catalog;
-- route observation summary;
-- paged direct-child task edges;
-- paged exact-route inspector sections;
-- one multiplexed family observation stream that accepts an explicit route set at open and carries route-tagged bounded committed-event metadata and provisional progress.
+- the health route for workspace ID, instance ID, application version, and protocol version range;
+- the capabilities route;
+- the roots listing for family selection;
+- the branch snapshot route, which returns one cursor plus one full `AgentState`;
+- the per-branch committed-event stream with after-cursor resume and separate cursorless provisional progress.
 
-The family observation stream carries no server-computed projection deltas. The observer refetches bounded inspector sections and route summaries, keyed by the committed event types it observes, only while those sections are requested or visible. One stream connection covers every loaded route; adding a newly discovered route reopens the stream with the expanded route set and the retained per-route cursors.
+For each loaded route the observer holds the snapshot `AgentState` in memory and applies committed stream events with the pure domain reducer, the established `AgentClient.watchBranch()` pattern. Everything the interface needs is derived from that retained state: delegation edges come from each route's durable `tasks` records, which carry exact child session and branch IDs; exact-route mailbox lifecycles come from mailbox records, which carry exact from- and to-branch IDs; runs, cells, effects, goals, gates, budgets, and artifact metadata come from their corresponding state records.
 
-The service advertises an explicit `observationV1` capability. Admission requires:
+Full `AgentState` values and their event streams are process-internal. The observer serves the browser only bounded DTO pages derived from retained state. Upstream snapshot size is not bounded; the 64-route family bound is the observer's memory control, and this trade is accepted for the trusted-local first version.
 
-- managed-service support;
-- product root-catalog support;
-- snapshot-plus-cursor resume;
-- committed-event deduplication;
-- cursorless progress support;
-- the exact managed observation view version;
-- a supported reducer/projection version.
+Admission requires the existing capability flags — managed service, product catalog, snapshot-plus-cursor resume, committed-event deduplication, and cursorless progress — plus a protocol version range that includes the branch-stream heartbeat revision. An unsupported capability or version produces `service_incompatible`.
 
-An unsupported capability or version produces `service_incompatible`.
+The one managed-protocol change is a periodic comment heartbeat on the existing branch stream, emitted at least every 15 seconds. SSE comment lines are already tolerated by existing clients, which receive an initial `: connected` comment today. The observer treats a stream silent for more than three heartbeat intervals as dead and triggers bounded rediscovery.
 
-Managed observation responses are server-side projections. They do not serialize a full `AgentState`. They preserve runtime-derived activity semantics instead of reimplementing those semantics in browser formatting code.
-
-The route mailbox view filters by exact `fromBranchId` or `toBranchId`. A session-wide mailbox page is not an exact-route source. The mailbox projection already stores exact from- and to-branch IDs, so exact-route filtering is a new query without a storage migration.
-
-The paged root catalog applies its filters and limits before loading route projections. It does not call the existing unbounded all-branch catalog path and then truncate the serialized result. The existing `/service/agents` roots listing remains unchanged in version one; the paged root catalog is a separate versioned observation route.
-
-Version one adds no new relational tables. If a later revision adds a bounded-view cache table, it must follow the repository migration and table-classification rules.
+Version one adds no new relational tables, storage queries, or managed observation routes.
 
 ### Bounds
 
-The first version applies these limits:
+The first version applies these limits to browser-facing responses and observer work:
 
-- root catalog page: 100 rows and 256 KiB;
-- direct-child page: 32 edges and 128 KiB;
+- browser root-selector page: 100 rows and 256 KiB;
 - loaded family: 64 routes;
 - concurrent family discovery requests: 4;
 - one managed read timeout: 5 seconds;
@@ -320,7 +308,9 @@ The first version applies these limits:
 - live-activity rail: 200 items or 1 MiB;
 - observer replay buffer: 512 envelopes or 2 MiB.
 
-Crossing a page or family bound returns explicit `truncated` metadata. When the 64-route bound stops breadth-first discovery, the total descendant count is unknown unless a managed response already supplied it. The UI says that more routes were not loaded; it does not invent an exact omitted count.
+Upstream branch snapshots are full `AgentState` values and are not byte-bounded. They are retained only in observer process memory, one per loaded route, so the 64-route family bound is the observer's memory control.
+
+Crossing a page or family bound returns explicit `truncated` metadata. When the 64-route bound stops breadth-first discovery, the total descendant count is unknown unless retained task records already supplied it. The UI says that more routes were not loaded; it does not invent an exact omitted count.
 
 Crossing a stream envelope bound omits the payload, retains event identity and digest metadata, and marks the affected inspector section stale. Crossing a browser queue or replay bound emits `resync_required`, discards provisional progress, and requires a fresh bounded family snapshot.
 
@@ -328,45 +318,45 @@ Crossing a stream envelope bound omits the payload, retains event identity and d
 
 The observer builds one family breadth-first:
 
-1. load the selected bounded root summary;
-2. request one page of direct-child task edges;
-3. enqueue exact child routes in canonical task order;
-4. load at most four routes concurrently;
-5. continue child-page traversal while total loaded routes remain below 64;
+1. load the selected root's branch snapshot;
+2. derive direct-child task edges from that route's durable `tasks` records in canonical order;
+3. enqueue exact child routes;
+4. load at most four route snapshots concurrently;
+5. continue traversal while total loaded routes remain below 64;
 6. preserve referenced but unavailable children as placeholder nodes;
-7. mark the graph truncated when routes or child pages remain.
+7. mark the graph truncated when reachable routes remain unloaded.
 
 A visited-route set prevents cycles and duplicate loading. A task edge remains identified by `taskId`. Family discovery does not scan the product branch catalog for forks.
 
 ### Live updates and generations
 
-The observer maintains one managed route cursor per loaded route and one observer sequence per generation. One multiplexed family observation stream covers every loaded route.
+The observer process owns one per-branch committed-event stream for each loaded route, up to the 64-route bound. Every authenticated browser tab shares these process-owned streams and the projection they maintain; tabs never open their own upstream connections. The observer maintains one managed route cursor per loaded route and one observer sequence per generation.
 
-For the managed family observation stream:
+For the upstream route streams:
 
 - cursors remain decimal strings and are compared as `BigInt`;
-- committed events are applied serially per route;
+- committed events are applied serially per route through the pure domain reducer;
 - duplicate or older route cursors are ignored;
 - provisional progress remains separate from durable state;
 - a committed effect outcome removes matching progress;
-- a newly committed child task schedules bounded family discovery, and newly loaded routes join by reopening the stream with the expanded route set and retained per-route cursors;
-- stale inspector sections are refetched only while requested or visible.
+- a newly committed child task observed on a parent route schedules bounded family discovery, and each newly loaded route receives its own snapshot and stream;
+- a stream silent for more than three managed heartbeat intervals is treated as dead and triggers bounded rediscovery.
 
 Every asynchronous completion is checked against the current observer generation and managed `instanceId`. Results from an older generation are ignored.
 
 Managed-service replacement:
 
-1. aborts the family observation stream and pending reads;
+1. aborts every route stream and pending read;
 2. discards provisional progress;
-3. validates the replacement manifest and observation status;
+3. validates the replacement manifest and authenticated health identity;
 4. checks required capabilities and versions;
 5. creates a new `AgentClient` inside the source adapter;
-6. loads fresh bounded snapshots;
+6. loads fresh route snapshots;
 7. emits one projection replacement with a new observer generation.
 
 `AgentClient.watchBranch()` alone is not replacement recovery because it snapshots only once and reconnects to one prior service. The observer lifecycle owns instance replacement.
 
-The observer sends an SSE heartbeat comment at least every 15 seconds. A disconnected or slow browser never causes an unbounded queue.
+The observer sends the browser an SSE heartbeat comment at least every 15 seconds. A disconnected or slow browser never causes an unbounded queue.
 
 ### Browser snapshot and stream race
 
@@ -450,17 +440,17 @@ The linked-executable acceptance test loads every initial asset while running fr
 - Managed-service absence is `service_stopped`.
 - An invalid, stale, incompatible, unauthenticated, or non-authoritative service is not treated as connected.
 - The observer does not compare the service against an observer-derived execution configuration hash.
-- The managed service provides authenticated read-only observation status that binds workspace ID, instance ID, protocol version, capabilities, and current execution authority.
+- The existing authenticated health and capabilities routes bind workspace ID, instance ID, protocol version range, and capability flags. No new status route is added.
 - The observer never opens LibSQL to inspect an execution lease.
 - The observer passively watches owner-only marker and manifest files while no browser is attached. Watching uses bounded-interval read-only polling of the exact known paths; it never creates directories or files and never sends an authenticated managed request, because any authenticated request resets the service idle timer.
 - No authenticated managed request or branch stream is kept open while the browser attachment count is zero. A session cookie by itself does not keep the count above zero.
 - On the first attached browser, the observer validates and connects to the currently discovered instance.
-- On the last browser disconnect, the observer immediately aborts family discovery, detail reads, and the upstream family observation stream.
-- While a browser remains attached, a family-stream failure or manifest replacement triggers bounded rediscovery and generation replacement.
+- On the last browser disconnect, the observer immediately aborts family discovery, detail reads, and every upstream route stream.
+- While a browser remains attached, a route-stream failure, heartbeat silence, or manifest replacement triggers bounded rediscovery and generation replacement.
 - The observer server remains available while the workspace or managed service is stopped.
 - The observer creates no canonical events, effects, profile preferences, product selection changes, or durable observer records.
 
-One browser viewing a family holds one multiplexed managed family observation stream covering up to 64 loaded routes. That stream is an attached managed-service client and may keep the service non-quiescent. The UI reports that fact. Closing the final browser releases the stream and permits ordinary quiescence.
+While at least one browser is attached, the observer process holds one committed-event stream per loaded route, up to 64, shared by every tab. Those streams are attached managed-service clients and may keep the service non-quiescent. The UI reports that fact. Closing the final browser releases every stream and permits ordinary quiescence.
 
 ## Security
 
@@ -535,38 +525,34 @@ A protocol-level read-only managed-service credential remains a later hardening 
 - Add signal-safe stop that aborts observer work without stopping Agencity.
 - Add checked-in HTML, JavaScript, and CSS resolved from `import.meta.url`.
 
-### 2. Read-only discovery and managed observation protocol
+### 2. Read-only discovery and managed-service validation
 
-This step is a separately verifiable milestone. Its protocol and `AgentClient` contracts land with their own tests before observer-package work begins, so the web observer builds on a proven contract.
+This step is a separately verifiable milestone with its own tests before observer-package work begins.
 
 - Add a strictly read-only manifest reader that never creates directories or files and retains owner-only and `O_NOFOLLOW` validation.
 - Add passive bounded-interval workspace-marker and service-manifest polling.
-- Add authenticated managed observation identity and execution-authority status validated without configuration-hash reconstruction.
-- Add the `observationV1` capability.
-- Add bounded paged initial-root catalog reads that enumerate roots from durable session records and project only root initial branches.
-- Add bounded route summary, direct-child, and exact-route detail contracts.
-- Add the multiplexed family observation stream over an explicit route set with per-route cursors.
-- Extend `AgentClient` with typed read-only observation methods.
-- Ensure managed observation endpoints do not serialize full `AgentState`.
-- Add exact branch filtering to route mailbox observation using the retained from- and to-branch columns; no migration is required.
+- Validate the discovered service through the existing authenticated health identity and capability flags, without configuration-hash reconstruction.
+- Add the periodic comment heartbeat to the existing branch stream, with tests proving existing stream clients are unaffected.
+- Classify unsupported protocol versions and missing capabilities as `service_incompatible`.
 
 ### 3. Narrow source and disposable family projection
 
-- Define the closed observer source interface.
-- Confine unrestricted `AgentClient` construction to one adapter.
+- Define the closed observer source interface over existing `AgentClient` read methods: health, capabilities, roots listing, branch snapshot, and branch stream.
+- Confine `AgentClient` construction and `src/protocol/` imports to one adapter module.
 - Add architecture checks for imports and allowed calls.
-- Build breadth-first family discovery from bounded child pages.
-- Enforce route, byte, concurrency, item, and timeout bounds.
-- Aggregate mailbox events by `mailboxMessageId`.
+- Build breadth-first family discovery from durable task edges in retained route states.
+- Maintain one full `AgentState` per loaded route with the pure domain reducer.
+- Enforce route, browser-facing byte, concurrency, item, and timeout bounds.
+- Filter exact-route mailbox activity in-process from retained from- and to-branch IDs, aggregated by `mailboxMessageId`.
 - Preserve unavailable and truncated nodes explicitly.
 - Keep historical item-cursor limitations explicit.
 
 ### 4. Generation-safe live updates
 
-- Open one multiplexed family observation stream covering every loaded route, and reopen it with retained per-route cursors when discovery adds routes.
+- Own one committed-event stream per loaded route in the observer process, shared by every browser tab, and open a snapshot plus stream for each newly discovered route.
 - Track one managed cursor per route and one observer sequence per generation.
-- Forward committed metadata, provisional progress, availability, and replacement envelopes; refetch bounded sections instead of consuming server-side deltas.
-- Add bounded replay, heartbeat, slow-client overflow, and `resync_required`.
+- Derive bounded browser envelopes from committed events, provisional progress, availability changes, and replacement.
+- Add bounded replay, browser heartbeat, upstream heartbeat-silence detection, slow-client overflow, and `resync_required`.
 - Abort and rebuild atomically across service replacement, family switch, and last-browser disconnect.
 - Ignore every asynchronous completion from an old generation.
 
@@ -595,9 +581,10 @@ This step is a separately verifiable milestone. Its protocol and `AgentClient` c
 - Add a source-checkout black-box test for ephemeral port, explicit port, bind conflict, signal shutdown, and no managed-service ownership.
 - Add a linked-executable black-box test from another repository that loads every static asset without internal IDs or direct supervisor access.
 - Add a headless-browser black-box journey covering token exchange, fragment removal, refresh, root selection, graph rendering, child and message live updates, detail inspection, service replacement, and final-browser disconnect.
-- Use Playwright Chromium as a test-only development dependency for the deterministic headless-browser journey. The repository has no existing browser tooling, so this is a new test model: the journey lives in its own script (`test:acceptance:observe-web`), the Chromium version is pinned through the locked Playwright dependency, and setup documentation states the one-time `bunx playwright install chromium` step. The script is a required acceptance gate; when the pinned browser is not installed it fails with that guidance rather than silently skipping.
+- Use Playwright Chromium as a test-only development dependency for the deterministic headless-browser journey. The repository has no existing browser tooling, so this is a new test model: the journey lives in its own explicitly invoked script (`test:acceptance:observe-web`), the Chromium version is pinned through the locked Playwright dependency, and setup documentation states the one-time `bunx playwright install chromium` step. The script is opt-in and is not part of `bun run verify` or any required gate, following the repository convention for prerequisite-dependent tests. When invoked without the pinned browser it fails with installation guidance; an unrun journey is reported as unverified, never as passed.
+- Keep every non-browser observer requirement — the observer HTTP API, source adapter, projection, bounds, generations, and adversarial HTTP behavior — covered by the deterministic required suites, so the opt-in browser journey verifies rendering and end-to-end interaction rather than correctness that would otherwise go untested.
 - Compare canonical history and executor activity before and after observation to prove that observer use creates no event or effect.
-- Verify that observer shutdown and final-browser disconnect leave managed sessions unchanged and release the upstream family stream and pending reads.
+- Verify that observer shutdown and final-browser disconnect leave managed sessions unchanged and release every upstream route stream and pending read.
 - Update `README.md`, CLI help, `docs/user-guide.md`, `docs/install.md`, `docs/configuration.md`, `docs/operator-guide.md`, `docs/protocol.md`, `docs/capabilities.md`, `docs/architecture.md`, `docs/security.md`, `docs/README.md`, and `AGENTS.md` when the feature ships.
 
 ## Acceptance criteria
@@ -625,19 +612,21 @@ The first version is complete when:
 19. No browser snapshot, page, queue, replay buffer, or stream envelope exceeds its declared bound without typed truncation or resync.
 20. Provisional progress disappears on outcome, disconnect, generation replacement, or resync and is never presented as retained history.
 21. Duplicate or older route events do not duplicate durable activity.
-22. Managed-service replacement discards the old generation and rebuilds the same committed family state from fresh bounded snapshots.
+22. Managed-service replacement discards the old generation and rebuilds the same committed family state from fresh snapshots.
 23. Late work from an old managed instance or family generation cannot change the active projection.
 24. Browser refresh succeeds through the process-local HttpOnly session without leaving the bootstrap token in the URL.
 25. Browser code never receives the managed-service bearer token or process-local session secret.
 26. Hostile Host, cross-site API, invalid session, unknown route, generic proxy, and state-changing observer requests fail closed.
 27. Hostile agent or repository strings render only as inert text.
 28. One slow browser receives bounded resync behavior rather than causing unbounded memory growth.
-29. Closing the final browser aborts the upstream family observation stream and permits normal managed-service quiescence.
+29. Closing the final browser aborts every upstream route stream and permits normal managed-service quiescence.
 30. Leaving the observer process open without a browser sends no authenticated managed request and does not defer service quiescence.
 31. Observer restart reconstructs current committed state after automatic sole-root selection or a new explicit choice, resets the activity rail, and shows a new connection boundary.
 32. No observer action appends a canonical event, executes an effect, changes a profile preference, or changes product selection.
 33. Ctrl-C or observer process termination stops only the observer and does not stop or cancel Agencity work.
-34. The installed headless-browser journey verifies the actual web interface rather than only the localhost JSON API.
+34. No observer web response contains a full `AgentState` serialization.
+35. A silently dead upstream stream is detected through heartbeat silence and triggers bounded rediscovery rather than an indefinite `connected` display.
+36. The opt-in headless-browser journey verifies the actual web interface; every non-browser observer behavior is covered by the deterministic required suites.
 
 ## Deferred work
 
@@ -652,6 +641,7 @@ The first version is complete when:
 - shared multi-user authorization;
 - steering, cancellation, and other privileged controls;
 - a protocol-level read-only managed-service credential;
+- a versioned bounded managed observation protocol: paged root catalog, bounded route summaries and inspector pages, an exact-route mailbox storage query, and one multiplexed family observation stream with per-route cursors, replacing full-snapshot consumption in the observer process;
 - an aggregate recursive-family snapshot that returns descendant state in one managed response;
 - observer subscriptions that do not affect managed-service quiescence while a browser is actively attached.
 

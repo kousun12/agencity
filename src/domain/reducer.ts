@@ -1653,16 +1653,21 @@ function validateAiGenerationProviderInput(
   context: import("./json.ts").JsonValue | undefined,
   messages: readonly import("./provider-input.ts").ProviderInputMessage[],
 ): void {
+  const first = messages[0];
   if (messages.length < 2 ||
-      messages[0]?.role !== "system" ||
-      messages[0].content !== AI_GENERATION_SYSTEM_INSTRUCTION ||
-      messages.slice(1).some((message) => message.role === "system")) {
+      first?.kind !== "text" ||
+      first.role !== "system" ||
+      first.content !== AI_GENERATION_SYSTEM_INSTRUCTION ||
+      messages.slice(1).some((message) =>
+        message.kind !== "text" || message.role === "system")) {
     throw new ValidationError("AI generation provider input must contain only its fixed system instruction");
   }
   if (Array.isArray(context) && context.length > 0) {
     const expected = `EXPLICIT CONTEXT (ordered JSON)\n${JSON.stringify(context)}`;
     const last = messages.at(-1);
-    if (last?.role !== "user" || last.content !== expected) {
+    if (last?.kind !== "text" ||
+        last.role !== "user" ||
+        last.content !== expected) {
       throw new ValidationError("AI generation provider input does not match its frozen explicit context");
     }
   }

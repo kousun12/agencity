@@ -708,6 +708,75 @@ describe("FU-005 protocol-backed terminal UI", () => {
     await supervisor.close();
   });
 
+  test("refreshes the service snapshot when a retained service streams an older event schema", async () => {
+    const temp = await makeTempRuntime("agencity-terminal-schema-refresh-"); temps.push(temp);
+    const supervisor = await Supervisor.open({
+      databaseUrl: temp.databaseUrl,
+      artifactDirectory: temp.artifactDirectory,
+      workspaceRoot: temp.workspaceRoot,
+      recover: false,
+    });
+    const session = await supervisor.createSession({
+      workspaceId: "terminal-schema-refresh",
+      sessionName: "Schema refresh",
+      branchName: "main",
+    });
+    const base = new AgentClient(
+      new InProcessProtocolTransport(new ProtocolServer(supervisor)),
+    );
+    let handlers: BranchWatchHandlers | undefined;
+    const watchBranch: AgentClient["watchBranch"] = async (
+      sessionId,
+      branchId,
+      next,
+      options = {},
+    ) => {
+      handlers = next;
+      const snapshot = await base.snapshot(sessionId, branchId);
+      await next.onSnapshot({
+        ...snapshot,
+        state: {
+          ...snapshot.state,
+          reducerVersion:
+            (snapshot.state.reducerVersion - 1) as typeof snapshot.state.reducerVersion,
+        },
+      });
+      await new Promise<void>((resolve) => {
+        if (options.signal?.aborted) resolve();
+        else options.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+    };
+    const client = new Proxy(base, {
+      get(target, property) {
+        if (property === "watchBranch") return watchBranch;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const ui = new TerminalUI(client, { interactive: false, manageSignals: false });
+    try {
+      await ui.attach(session.sessionId, session.branchId, false);
+      await waitFor(() => handlers !== undefined, "schema-refresh watch");
+      const committed = await supervisor.appendMessage(
+        session.sessionId,
+        session.branchId,
+        "assistant",
+        "visible after schema refresh",
+      );
+      const olderEvent = {
+        ...committed,
+        schemaVersion: EVENT_SCHEMA_VERSION - 1,
+      } as AgentEvent;
+      await handlers!.onEvent(olderEvent);
+      expect(ui.presentation.state.messages.at(-1)?.content)
+        .toBe("visible after schema refresh");
+      expect(ui.presentation.connection).not.toBe("reconnecting");
+    } finally {
+      await ui.detach(false);
+      await supervisor.close();
+    }
+  });
+
   test("navigates exact retained family routes without changing product selection or overlapping watches", async () => {
     const temp = await makeTempRuntime("agencity-terminal-family-navigation-"); temps.push(temp);
     const supervisor = await Supervisor.open({

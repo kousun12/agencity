@@ -213,9 +213,32 @@ describe("formal AI SDK model responses", () => {
       "openai/gpt-5.6-sol",
       "high",
     );
+    const providerInput = candidateFor(executor, dispatch, {
+      session: { id: "session-cache", branchId: "branch-cache" },
+      messages: [
+        { role: "user", content: "run one cell" },
+        {
+          kind: "assistant-tool-call",
+          callId: "call-prior",
+          name: "bun_console",
+          input: { source: "return 1;" },
+        },
+        {
+          kind: "tool-result",
+          callId: "call-prior",
+          name: "bun_console",
+          content: "{\"value\":1}",
+        },
+        {
+          role: "user",
+          content: "finish",
+          cacheBreakpoint: true,
+        },
+      ],
+    });
     const privateDeltas: string[] = [];
     const output = await executor.executeResponseAware(
-      { messages: [{ role: "user", content: "finish" }] },
+      providerInput as unknown as JsonValue,
       dispatch,
       new AbortController().signal,
       (delta) => privateDeltas.push(delta.kind),
@@ -237,6 +260,12 @@ describe("formal AI SDK model responses", () => {
         name: "finish",
       }),
     ]);
+    expect(output.response.usage).toMatchObject({
+      inputTokens: 7,
+      outputTokens: 3,
+      cacheReadTokens: 3,
+      cacheWriteTokens: 2,
+    });
     expect(JSON.stringify(output).match(/Done\./g)).toHaveLength(1);
     expect(privateDeltas).toContain("tool-call-start");
     expect(privateDeltas).toContain("tool-input-delta");
@@ -245,6 +274,10 @@ describe("formal AI SDK model responses", () => {
       stream: true,
       tool_choice: "required",
       parallel_tool_calls: false,
+      prompt_cache_key: providerInput.cache.mode === "openai-explicit"
+        ? providerInput.cache.promptCacheKey
+        : undefined,
+      prompt_cache_options: { mode: "explicit", ttl: "30m" },
       reasoning: { effort: "high" },
       tools: [
         { type: "function", name: "bun_console" },
@@ -254,6 +287,31 @@ describe("formal AI SDK model responses", () => {
     expect(body!.tools.every((item: any) => item.strict === undefined))
       .toBe(true);
     expect(body!.store).toBe(false);
+    expect(body).not.toHaveProperty("previous_response_id");
+    expect(body!.input).toEqual(expect.arrayContaining([
+      {
+        type: "function_call",
+        call_id: "call-prior",
+        name: "bun_console",
+        arguments: "{\"source\":\"return 1;\"}",
+      },
+      {
+        type: "function_call_output",
+        call_id: "call-prior",
+        output: [{
+          type: "input_text",
+          text: "{\"value\":1}",
+        }],
+      },
+      {
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: "finish",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        }],
+      },
+    ]));
     expect(requestCount).toBe(1);
   });
 
@@ -308,6 +366,8 @@ describe("formal AI SDK model responses", () => {
     ).catch(() => {});
     expect(body?.tool_choice).toBe("required");
     expect(body).not.toHaveProperty("parallel_tool_calls");
+    expect(body).not.toHaveProperty("prompt_cache_key");
+    expect(body).not.toHaveProperty("prompt_cache_options");
     expect(body?.tools.every((item: any) =>
       item.strict === undefined)).toBe(true);
   });
@@ -368,7 +428,24 @@ describe("formal AI SDK model responses", () => {
       "high",
     );
     const output = await executor.executeResponseAware(
-      { messages: [{ role: "user", content: "finish" }] },
+      {
+        messages: [
+          { role: "user", content: "run one cell" },
+          {
+            kind: "assistant-tool-call",
+            callId: "anthropic-prior-call",
+            name: "bun_console",
+            input: { source: "return 1;" },
+          },
+          {
+            kind: "tool-result",
+            callId: "anthropic-prior-call",
+            name: "bun_console",
+            content: "{\"value\":1}",
+          },
+          { role: "user", content: "finish" },
+        ],
+      },
       dispatch,
       new AbortController().signal,
     );
@@ -381,6 +458,13 @@ describe("formal AI SDK model responses", () => {
       thinking: { type: "adaptive", display: "summarized" },
       output_config: { effort: "high" },
     });
+    const serializedBody = JSON.stringify(body);
+    expect(serializedBody).toContain("\"type\":\"tool_use\"");
+    expect(serializedBody).toContain("\"id\":\"anthropic-prior-call\"");
+    expect(serializedBody).toContain("\"type\":\"tool_result\"");
+    expect(serializedBody).toContain("{\\\"value\\\":1}");
+    expect(serializedBody).not.toContain("prompt_cache_breakpoint");
+    expect(serializedBody).not.toContain("promptCacheBreakpoint");
     expect(output).toMatchObject({
       response: {
         termination: { kind: "tool-calls", rawReason: "tool_use" },
@@ -1194,7 +1278,13 @@ describe("formal AI SDK model responses", () => {
       ...finishParts("tool-calls", "tool_calls"),
     ]);
     expect(output.response).toMatchObject({
-      usage: { inputTokens: 7, outputTokens: 3, costUsd: 0.0125 },
+      usage: {
+        inputTokens: 7,
+        outputTokens: 3,
+        costUsd: 0.0125,
+        cacheReadTokens: 3,
+        cacheWriteTokens: 2,
+      },
       warnings: [
         { kind: "coerced" },
         { kind: "coerced" },
@@ -1543,7 +1633,14 @@ function finishParts(
   finishReason: string,
   rawFinishReason?: string,
 ): RequiredToolStreamPart[] {
-  const usage = { inputTokens: 7, outputTokens: 3 };
+  const usage = {
+    inputTokens: 7,
+    inputTokenDetails: {
+      cacheReadTokens: 3,
+      cacheWriteTokens: 2,
+    },
+    outputTokens: 3,
+  };
   return [
     part("finish-step", {
       finishReason,
@@ -1605,7 +1702,10 @@ function openAiToolStream(
       incomplete_details: null,
       usage: {
         input_tokens: 7,
-        input_tokens_details: { cached_tokens: 0 },
+        input_tokens_details: {
+          cached_tokens: 3,
+          cache_write_tokens: 2,
+        },
         output_tokens: 3,
         output_tokens_details: { reasoning_tokens: 0 },
       },

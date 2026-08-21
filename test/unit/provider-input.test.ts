@@ -10,6 +10,7 @@ import {
   resolveBuiltInModelResponseContract,
   resolveModelDispatch,
   serializedProviderInput,
+  validateModelResponse,
   validateProviderInputCandidate,
   type JsonValue,
   type ModelDispatch,
@@ -28,15 +29,18 @@ const capacity = {
   targetRatio: 0.6,
 };
 
-function dispatch(): ModelDispatch {
+function dispatch(
+  provider = capacity.provider,
+  model = capacity.model,
+): ModelDispatch {
   const responseContract = resolveBuiltInModelResponseContract(
     AGENT_TOOL_CONTRACT_ID,
     "provider-strict",
   );
   return resolveModelDispatch({
     configuration: {
-      provider: capacity.provider,
-      model: capacity.model,
+      provider,
+      model,
       temperature: 0.25,
       maxOutputTokens: 2_048,
       reasoningEffort: "high",
@@ -79,10 +83,15 @@ describe("versioned provider input", () => {
 
     expect(candidate.version).toBe(PROVIDER_INPUT_VERSION);
     expect(candidate.messages).toEqual([
-      { role: "system", content: "system" },
-      { role: "user", content: "[tool observation]\ntool output" },
-      { role: "assistant", content: "assistant" },
+      { kind: "text", role: "system", content: "system" },
+      {
+        kind: "text",
+        role: "user",
+        content: "[tool observation]\ntool output",
+      },
+      { kind: "text", role: "assistant", content: "assistant" },
     ]);
+    expect(candidate.cache).toEqual({ mode: "disabled" });
     expect(candidate.tools.map((tool) => ({
       name: tool.name,
       strict: tool.strict,
@@ -122,7 +131,216 @@ describe("versioned provider input", () => {
       .toBe(canonicalJsonByteLength(candidate as unknown as JsonValue));
     expect(estimateProviderInputCandidate(candidate).utf8Bytes)
       .toBe(canonicalJsonByteLength(serializedProviderInput(candidate)));
+    expect(serializedProviderInput(candidate)).toMatchObject({
+      cache: { mode: "disabled" },
+    });
     expect(validateProviderInputCandidate(candidate)).toEqual(candidate);
+  });
+
+  test("retains provider-neutral tool calls, tool results, and breakpoints in order", () => {
+    const openAiCapacity = {
+      ...capacity,
+      provider: "openai",
+      model: "openai/gpt-5.6-sol",
+    };
+    const modelDispatch = dispatch(
+      openAiCapacity.provider,
+      openAiCapacity.model,
+    );
+    const candidate = buildProviderInputCandidate({
+      context: {
+        session: { id: "session-1", branchId: "branch-1" },
+        messages: [
+          {
+            kind: "text",
+            role: "user",
+            content: "Use the console.",
+            cacheBreakpoint: true,
+          },
+          {
+            kind: "assistant-tool-call",
+            callId: "call-1",
+            name: "bun_console",
+            input: { code: "return 1" },
+          },
+          {
+            kind: "tool-result",
+            callId: "call-1",
+            name: "bun_console",
+            content: "{\"value\":1}",
+            cacheBreakpoint: true,
+          },
+        ],
+      },
+      modelDispatch,
+      capacity: openAiCapacity,
+    });
+
+    expect(candidate.messages).toEqual([
+      {
+        kind: "text",
+        role: "user",
+        content: "Use the console.",
+        cacheBreakpoint: true,
+      },
+      {
+        kind: "assistant-tool-call",
+        callId: "call-1",
+        name: "bun_console",
+        input: { code: "return 1" },
+      },
+      {
+        kind: "tool-result",
+        callId: "call-1",
+        name: "bun_console",
+        content: "{\"value\":1}",
+        cacheBreakpoint: true,
+      },
+    ]);
+    expect(candidate.tools.map((tool) => tool.name)).toEqual(
+      modelDispatch.responseContract.kind === "required-tool-set"
+        ? modelDispatch.responseContract.tools.map((tool) => tool.name)
+        : [],
+    );
+
+    const orphan = JSON.parse(JSON.stringify(candidate));
+    orphan.messages = orphan.messages.slice(2);
+    reseal(orphan);
+    expect(() => validateProviderInputCandidate(orphan))
+      .toThrow("tool result");
+  });
+
+  test("derives a stable direct-OpenAI cache contract from retained route identity", () => {
+    const openAiCapacity = {
+      ...capacity,
+      provider: "openai",
+      model: "openai/gpt-5.6-sol",
+    };
+    const modelDispatch = dispatch(
+      openAiCapacity.provider,
+      openAiCapacity.model,
+    );
+    const context: JsonValue = {
+      session: { id: "session-1", branchId: "branch-1" },
+      messages: [{
+        kind: "text",
+        role: "system",
+        content: "stable prefix",
+        cacheBreakpoint: true,
+      }],
+    };
+    const first = buildProviderInputCandidate({
+      context,
+      modelDispatch,
+      capacity: openAiCapacity,
+    });
+    const rebuilt = buildProviderInputCandidate({
+      context,
+      modelDispatch,
+      capacity: openAiCapacity,
+    });
+    const otherBranch = buildProviderInputCandidate({
+      context: {
+        ...context as Record<string, JsonValue>,
+        session: { id: "session-1", branchId: "branch-2" },
+      },
+      modelDispatch,
+      capacity: openAiCapacity,
+    });
+
+    expect(first.cache).toEqual({
+      mode: "openai-explicit",
+      promptCacheKey: expect.stringMatching(/^[a-f0-9]{64}$/),
+      ttl: "30m",
+    });
+    expect(rebuilt).toEqual(first);
+    expect(otherBranch.cache).not.toEqual(first.cache);
+    expect(serializedProviderInput(first)).toMatchObject({
+      cache: first.cache,
+    });
+    expect(validateProviderInputCandidate(first, {
+      context,
+      modelDispatch,
+      capacity: openAiCapacity,
+    })).toEqual(first);
+
+    const tampered = JSON.parse(JSON.stringify(first));
+    tampered.cache.ttl = "1h";
+    reseal(tampered);
+    expect(() => validateProviderInputCandidate(tampered))
+      .toThrow("cache contract");
+
+    const validShapeTamper = JSON.parse(JSON.stringify(first));
+    validShapeTamper.cache.promptCacheKey = "b".repeat(64);
+    reseal(validShapeTamper);
+    expect(() => validateProviderInputCandidate(validShapeTamper, {
+      context,
+      modelDispatch,
+      capacity: openAiCapacity,
+    })).toThrow("differs from reconstructed");
+  });
+
+  test("keeps prior normalized messages as an exact prefix when context appends", () => {
+    const modelDispatch = dispatch();
+    const priorMessages: JsonValue[] = [
+      { kind: "text", role: "user", content: "start" },
+      {
+        kind: "assistant-tool-call",
+        callId: "call-1",
+        name: "bun_console",
+        input: { code: "return 1" },
+      },
+      {
+        kind: "tool-result",
+        callId: "call-1",
+        name: "bun_console",
+        content: "1",
+      },
+    ];
+    const first = buildProviderInputCandidate({
+      context: { messages: priorMessages },
+      modelDispatch,
+      capacity,
+    });
+    const next = buildProviderInputCandidate({
+      context: {
+        messages: [
+          ...priorMessages,
+          { kind: "text", role: "user", content: "continue" },
+        ],
+      },
+      modelDispatch,
+      capacity,
+    });
+
+    expect([...next.messages.slice(0, first.messages.length)])
+      .toEqual([...first.messages]);
+    expect(next.messages.length).toBe(first.messages.length + 1);
+  });
+
+  test("accepts finite nonnegative cache usage without changing core token fields", () => {
+    const response = {
+      kind: "complete",
+      blocks: [],
+      termination: { kind: "text-stop" },
+      usage: {
+        inputTokens: 100,
+        outputTokens: 20,
+        costUsd: 0.01,
+        cacheReadTokens: 80,
+        cacheWriteTokens: 10,
+      },
+      warnings: [],
+      transport: { provider: "openai", adapter: "openai.responses.v1" },
+    };
+    expect(validateModelResponse(response).usage).toEqual(response.usage);
+
+    for (const invalid of [-1, Number.POSITIVE_INFINITY, Number.NaN]) {
+      expect(() => validateModelResponse({
+        ...response,
+        usage: { ...response.usage, cacheReadTokens: invalid },
+      })).toThrow("cacheReadTokens");
+    }
   });
 
   test("ignores unsent retained-context fields in candidate identity and estimates", () => {
@@ -289,16 +507,20 @@ describe("versioned provider input", () => {
       [],
       modelDispatch,
       "system prompt",
+      undefined,
+      undefined,
+      { resetReason: "unit-test-reset" },
     ) as any;
 
-    expect(context.run.recentTrajectory.map((item: any) => item.ordinal))
+    const transcript = transcriptBlock(context);
+    expect(transcript.recentTrajectory.map((item: any) => item.ordinal))
       .toEqual([5, 6, 7, 8, 9, 10, 11, 12]);
-    expect(context.run.recentTrajectory.every((item: any) =>
+    expect(transcript.recentTrajectory.every((item: any) =>
       item.action.source.text === undefined &&
       item.action.source.originalByteLength > 2_048 &&
       typeof item.action.source.sha256 === "string" &&
       item.action.declaredPurpose.text.startsWith("complete step "))).toBe(true);
-    expect(context.run.recentTrajectory.at(-1).outcome).toMatchObject({
+    expect(transcript.recentTrajectory.at(-1).outcome).toMatchObject({
       status: "committed",
       eventId: "cell-terminal-12",
       result: {
@@ -313,7 +535,7 @@ describe("versioned provider input", () => {
         maxAttemptCount: 2,
       }],
     });
-    expect(JSON.stringify(context.run.recentTrajectory)).not.toContain("rrrrrrrr");
+    expect(JSON.stringify(transcript.recentTrajectory)).not.toContain("rrrrrrrr");
     expect(context.run.instruction).toContain("If the evidence is sufficient, call finish now");
     expect(context.run.instruction).not.toContain("Continue from these");
   });
@@ -389,9 +611,12 @@ describe("versioned provider input", () => {
       }],
       modelDispatch,
       "system prompt",
+      undefined,
+      undefined,
+      { resetReason: "unit-test-reset" },
     ) as any;
 
-    expect(context.run.recentTrajectory[0]).toMatchObject({
+    expect(transcriptBlock(context).recentTrajectory[0]).toMatchObject({
       action: {
         type: "bun_console",
         declaredPurpose: { text: "repair the reported syntax error" },
@@ -403,7 +628,7 @@ describe("versioned provider input", () => {
       outcome: {
         status: "failed",
         eventId: "cell-failed-1",
-        details: "run.observations",
+        details: "segment.observations",
       },
     });
     expect(context.run.instruction).toContain("about 20 lines on each side");
@@ -490,6 +715,9 @@ describe("versioned provider input", () => {
         [],
         modelDispatch,
         "system prompt",
+        undefined,
+        undefined,
+        step === 1 ? {} : { resetReason: `benchmark-reset-${step}` },
       );
       const candidate = buildProviderInputCandidate({
         context: providerContext,
@@ -519,4 +747,14 @@ function reseal(candidate: Record<string, any>): void {
     if (next === candidate.exactUtf8Bytes) return;
     candidate.exactUtf8Bytes = next;
   }
+}
+
+function transcriptBlock(context: Record<string, any>): Record<string, any> {
+  const message = context.messages.find((candidate: any) =>
+    typeof candidate?.content === "string" &&
+    candidate.content.startsWith("AGENCITY DURABLE RUN TRANSCRIPT\n"));
+  if (!message) throw new Error("Missing durable run transcript");
+  return JSON.parse(
+    message.content.slice("AGENCITY DURABLE RUN TRANSCRIPT\n".length),
+  );
 }

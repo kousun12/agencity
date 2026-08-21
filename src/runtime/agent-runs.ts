@@ -44,6 +44,7 @@ import {
   type ModelDispatch,
   type ModelEffectFailureCode,
   type ModelEffectOutputV2,
+  type ProviderInputCandidate,
   type ReplNamespaceStatus,
   validateTypedAgentToolSubmissionValue,
   validateModelEffectOutputV2,
@@ -140,8 +141,8 @@ const TERMINAL_RUN_STATUSES: readonly AgentRunStatus[] = [
 /**
  * Events produced by execution that are delivered through the exact-once run
  * observation ledger. Persistent state and conversation remain available in
- * the ordinary bounded durable context, but these event payloads occur in the
- * provider-facing `run.observations` array only on the dependent step.
+ * the ordinary bounded durable context, but these event payloads occur only in
+ * the dependent appended tool result or a replacement segment's observation block.
  */
 const OBSERVATION_TYPES = new Set([
   "CellCommitted", "CellFailed", "CellAbandoned", "EffectOutcomeRecorded",
@@ -160,6 +161,7 @@ const RUN_TRAJECTORY_SOURCE_BYTES = 2_048;
 const RUN_TRAJECTORY_RESULT_BYTES = 3_072;
 const RUN_TRAJECTORY_PURPOSE_BYTES = 256;
 const RUN_TRAJECTORY_ERROR_SUMMARY_BYTES = 768;
+const SEGMENT_RESET_OBSERVATION_BYTES = 32 * 1_024;
 
 const SDK_GUIDE = [
   "Treat every model step as a decision boundary: call finish when the user request is resolved, or call bun_console for one necessary next action. Do not execute merely because another step is available.",
@@ -698,6 +700,16 @@ export class AgentRunService {
       const modelDispatch = this.#agentDispatch(state, run.invocationContract);
       const window = this.#windowConfiguration(state);
       const prompt = await this.#runPrompt(sessionId, run, modelDispatch);
+      const previousTranscript = previousProviderTranscript(
+        state,
+        events,
+        run,
+        step.ordinal,
+      );
+      const additionalRecordIds = [
+        ...step.observationEventIds,
+        ...(previousTranscript?.recordIds ?? []),
+      ];
       let materialized;
       let proactiveCompactions = 0;
       if (this.compactions) {
@@ -710,7 +722,7 @@ export class AgentRunService {
             const retained = await this.contexts.materialize(sessionId, branchId, {
               contextId: completedCompactions === 0 ? step.contextId : `${step.contextId}-window-${completedCompactions}`,
               idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}:window:${completedCompactions}`,
-              additionalRecordIds: step.observationEventIds,
+              additionalRecordIds,
               promptProvenance: prompt.provenance,
               agentProfileVersionId: run.profilePin.profileVersionId,
               transform: (base) => agentProviderContext(
@@ -722,6 +734,17 @@ export class AgentRunService {
                 prompt.content,
                 replNamespace,
                 this.clock(),
+                {
+                  ...(previousTranscript === undefined
+                    ? {}
+                    : { previousTranscript }),
+                  ...(completedCompactions === 0
+                    ? {}
+                    : {
+                        resetReason:
+                          `automatic-compaction-${completedCompactions}`,
+                      }),
+                },
               ),
               providerInput: {
                 modelDispatch,
@@ -738,7 +761,7 @@ export class AgentRunService {
             estimateProviderInputCandidate(candidate.providerInput).estimatedTokens,
           measureUtf8Bytes: (candidate) =>
             candidate.providerInput.exactUtf8Bytes,
-          compact: async ({ iteration }) => {
+          compact: async ({ iteration, candidate }) => {
             const compacted = await this.compactions!.compact(sessionId, branchId, {
               strategy: "deterministic-extractive-v1", reason: "automatic-threshold", requestedBy: "supervisor",
               idempotencyKey: `agent-run-threshold:${run.id}:${step.ordinal}:${iteration}`,
@@ -746,7 +769,29 @@ export class AgentRunService {
             });
             if (compacted.status === "completed") {
               proactiveCompactions++;
-              return { outcome: "compacted" as const, provenance: { compactionId: compacted.compactionId, contextId: compacted.contextId, sourceDigest: compacted.sourceDigest } };
+              return {
+                outcome: "compacted" as const,
+                provenance: {
+                  kind: "canonical-context-compaction",
+                  compactionId: compacted.compactionId,
+                  contextId: compacted.contextId ?? null,
+                  sourceDigest: compacted.sourceDigest,
+                } as JsonValue,
+              };
+            }
+            if (previousTranscript !== undefined) {
+              proactiveCompactions++;
+              return {
+                outcome: "compacted" as const,
+                provenance: {
+                  kind: "provider-transcript-segment-reset",
+                  runId: run.id,
+                  throughStepOrdinal: previousTranscript.stepOrdinal,
+                  sourceProviderInputDigest:
+                    candidate.providerInput.digest,
+                  sourceRecordIds: additionalRecordIds,
+                } as JsonValue,
+              };
             }
             return { outcome: "protected-only" as const, protectedSourceCount: Math.max(0, events.length - compacted.sourceEventIds.length) };
           },
@@ -761,7 +806,7 @@ export class AgentRunService {
           replNamespace = this.replNamespaceStatus(sessionId, branchId);
           contextEvent = (await this.contexts.materialize(sessionId, branchId, {
             contextId: step.contextId, idempotencyKey: `agent-run-context:${run.id}:${step.ordinal}`,
-            additionalRecordIds: step.observationEventIds,
+            additionalRecordIds,
             promptProvenance: prompt.provenance,
             agentProfileVersionId: run.profilePin.profileVersionId,
             transform: (base) => agentProviderContext(
@@ -773,6 +818,9 @@ export class AgentRunService {
               prompt.content,
               replNamespace!,
               this.clock(),
+              previousTranscript === undefined
+                ? {}
+                : { previousTranscript },
             ),
             providerInput: {
               modelDispatch,
@@ -938,7 +986,15 @@ export class AgentRunService {
           idempotencyKey: `agent-run-overflow:${run.id}:${step.ordinal}:${attempt.attempt}`,
           retainRecentMessages: Math.max(1, AUTOMATIC_COMPACTION_RECENT_MESSAGES - attempt.attempt), capacity: window.provenance,
         });
-        if (compacted.status === "completed") {
+        const providerTranscriptResetAvailable =
+          previousProviderTranscript(
+            current,
+            events,
+            current.agentRuns[run.id] ?? run,
+            step.ordinal,
+          ) !== undefined;
+        if (compacted.status === "completed" ||
+            providerTranscriptResetAvailable) {
           const nextAttempt = attempt.attempt + 1;
           const nextReplNamespace = this.replNamespaceStatus(
             sessionId,
@@ -959,6 +1015,7 @@ export class AgentRunService {
               systemPromptFromContext(context),
               nextReplNamespace,
               this.clock(),
+              { resetReason: `provider-overflow-${nextAttempt}` },
             ),
             providerInput: {
               modelDispatch: call.modelDispatch,
@@ -2024,6 +2081,10 @@ export function agentProviderContext(
   systemPrompt: string,
   replNamespace: ReplNamespaceStatus = COLD_REPL_NAMESPACE,
   observedAtMs: number = Date.now(),
+  transcriptOptions: {
+    readonly previousTranscript?: PreviousProviderTranscript;
+    readonly resetReason?: string;
+  } = {},
 ): JsonValue {
   if (modelDispatch.responseContract.kind !== "required-tool-set") {
     throw new ValidationError("Agent provider context requires its retained formal tool contract");
@@ -2037,15 +2098,6 @@ export function agentProviderContext(
       ? [{ ...message, role: "user", content: `DURABLE SYSTEM RECORD\n${message.content}` }]
       : [message];
   }) : [];
-  const durableRecentActivity = Array.isArray(durable.recentActivity)
-    ? durable.recentActivity
-    : [];
-  const recentTrajectory = recentRunTrajectory(
-    run,
-    stepOrdinal,
-    durableRecentActivity,
-    observations,
-  );
   const recentActivity = Array.isArray(durable.recentActivity)
     ? durable.recentActivity.filter((item) => !item || typeof item !== "object" || Array.isArray(item) || !OBSERVATION_TYPES.has(String(item.type)))
     : [];
@@ -2124,14 +2176,56 @@ export function agentProviderContext(
       })}`,
     });
   }
-  const { repositoryInstructions: _repositoryInstructions, ...providerDurable } = durable;
+  const {
+    repositoryInstructions: _repositoryInstructions,
+    messages: _messages,
+    recentActivity: _recentActivity,
+    providerInputCache: _providerInputCache,
+    transcriptState: _transcriptState,
+    ...providerDurable
+  } = durable;
   const durableContext = Object.fromEntries([
     "runtime", "agentProfile", "userProfile", "session", "goal", "tasks",
     "documents", "inputSets", "harness", "compactions", "queryHints",
     "budget", "mailbox", "terminalNotices", "recursiveModels",
     "heartbeats", "schedules", "wakes", "activeRuns", "workingValues",
-    "artifacts",
-  ].filter((key) => durable[key] !== undefined).map((key) => [key, durable[key]]));
+    "artifacts", "repositoryInstructions",
+  ].filter((key) => durable[key] !== undefined).map((key) => [key, durable[key]])) as
+    Record<string, JsonValue>;
+  const responseContract = {
+    contractId: modelDispatch.responseContract.contractId,
+    version: modelDispatch.responseContract.version,
+    contractDigest: modelDispatch.responseContract.contractDigest,
+    schemaEnforcement: modelDispatch.responseContract.schemaEnforcement,
+    selection: modelDispatch.responseContract.selection,
+  };
+  const cacheEnabled = modelDispatch.configuration?.provider === "openai";
+  const prior = transcriptOptions.resetReason === undefined
+    ? transcriptOptions.previousTranscript
+    : undefined;
+  if (stepOrdinal > 1 && prior === undefined &&
+      transcriptOptions.resetReason === undefined) {
+    throw new ValidationError(
+      `Agent provider transcript for step ${stepOrdinal} has no retained prior provider input`,
+    );
+  }
+  const priorTranscriptState = prior?.context.transcriptState;
+  const priorDurableContext = priorTranscriptState &&
+    typeof priorTranscriptState === "object" &&
+    !Array.isArray(priorTranscriptState) &&
+    priorTranscriptState.durableContext &&
+    typeof priorTranscriptState.durableContext === "object" &&
+    !Array.isArray(priorTranscriptState.durableContext)
+    ? priorTranscriptState.durableContext as Record<string, JsonValue>
+    : undefined;
+  if (prior !== undefined && priorDurableContext === undefined) {
+    throw new ValidationError(
+      `Agent provider transcript for step ${stepOrdinal} has no retained durable context baseline`,
+    );
+  }
+  const changedDurableContext = priorDurableContext === undefined
+    ? undefined
+    : durableContextDelta(priorDurableContext, durableContext);
   const correctingRejectedAction = observations.some((observation) =>
     observation.type === "AgentRunActionRejected" ||
     observation.type === "AgentRunTypedActionViolationCommitted"
@@ -2158,12 +2252,12 @@ export function agentProviderContext(
     task: run.task,
     stepOrdinal,
     status: run.status,
+    budget: durable.budget ?? null,
     ...(run.deadline === null
       ? {}
       : { deadline: deadlineTelemetry(run, observedAtMs) }),
     replNamespace,
-    recentTrajectory,
-    observations,
+    observationEventIds: observations.map((observation) => observation.eventId),
     instruction: correctingRejectedAction
       ? "The prior response was rejected without executing any code. Use the exact typed validation error in the observation and call exactly one provided tool with valid input."
       : recoveringChangedReplEpoch
@@ -2172,30 +2266,201 @@ export function agentProviderContext(
       ? "The prior cell or effect failed. Use the exact bounded error and any reliable path, line, column, or named symbol in the new observations. If inspection is needed, read only a small surrounding range (about 20 lines on each side), or the smallest relevant function or section when no reliable location exists. Call bun_console for one targeted repair, or finish blocked/failed if safe progress is not possible. Do not reread the whole file."
       : stepOrdinal === 1
       ? "Decide whether the request can be answered directly. If execution is necessary, call bun_console for the smallest first action that resolves a specific requirement; otherwise call finish."
-      : "Decide whether the task is complete from recentTrajectory and the new observations. If the evidence is sufficient, call finish now. Otherwise call bun_console for the single smallest action that resolves one specific remaining requirement. Do not repeat an unchanged inspection or reconstruct the active run from notebook history.",
+      : "Decide whether the task is complete from the append-only tool transcript and latest durable state delta. If the evidence is sufficient, call finish now. Otherwise call bun_console for the single smallest action that resolves one specific remaining requirement. Do not repeat an unchanged inspection or reconstruct the active run from notebook history.",
   };
-  // Keep the stable durable projection before volatile per-step telemetry.
-  // Provider prefix caches can then reuse unchanged runtime/profile/task state
-  // without changing any model-visible facts or the retained exact candidate.
-  const providerStep = { durableContext, run: stepInput };
+  const segmentId = canonicalJsonDigest({
+    runId: run.id,
+    resetReason: transcriptOptions.resetReason ?? "initial",
+    compactions: durable.compactions ?? null,
+  });
+  const initialStableBlock = {
+    protocol: "agencity.provider-transcript.v1",
+    runId: run.id,
+    segmentId,
+    ...(transcriptOptions.resetReason === undefined
+      ? {}
+      : { resetReason: transcriptOptions.resetReason }),
+    durableContext,
+    ...(stepOrdinal <= 1
+      ? {}
+      : {
+          recentTrajectory: recentRunTrajectory(
+            run,
+            stepOrdinal,
+            Array.isArray(durable.recentActivity) ? durable.recentActivity : [],
+            observations,
+          ),
+          observations: boundedSegmentResetObservations(observations),
+        }),
+    responseContract,
+  };
+  const messages: JsonValue[] = prior === undefined
+    ? [
+        { role: "system", content: systemPrompt },
+        ...repositoryMessages,
+        ...existingMessages,
+        {
+          role: "user",
+          content: `AGENCITY DURABLE RUN TRANSCRIPT\n${JSON.stringify(initialStableBlock)}`,
+          ...(cacheEnabled
+            ? { cacheBreakpoint: { mode: "explicit" } }
+            : {}),
+        },
+      ]
+    : [
+        ...JSON.parse(JSON.stringify(prior.candidate.messages)) as JsonValue[],
+        ...providerTranscriptOutcomeMessages(prior, observations),
+        ...(changedDurableContext === undefined ||
+            Object.keys(changedDurableContext).length === 0
+          ? []
+          : [{
+              role: "user",
+              content: `AGENCITY DURABLE STATE DELTA\n${JSON.stringify({
+                protocol: "agencity.durable-state-delta.v1",
+                runId: run.id,
+                completedStepOrdinal: prior.stepOrdinal,
+                changed: changedDurableContext,
+              })}`,
+            }]),
+      ];
+  messages.push({
+    role: "user",
+    content: `AGENCITY NEXT ACTION\n${JSON.stringify(stepInput)}`,
+    ...(cacheEnabled
+      ? { cacheBreakpoint: { mode: "explicit" } }
+      : {}),
+  });
   return JSON.parse(JSON.stringify({
     ...providerDurable,
     recentActivity,
-    responseContract: {
-      contractId: modelDispatch.responseContract.contractId,
-      version: modelDispatch.responseContract.version,
-      contractDigest: modelDispatch.responseContract.contractDigest,
-      schemaEnforcement: modelDispatch.responseContract.schemaEnforcement,
-      selection: modelDispatch.responseContract.selection,
+    responseContract,
+    transcriptState: {
+      protocol: "agencity.provider-transcript-state.v1",
+      runId: run.id,
+      segmentId,
+      durableContext,
+      durableContextDigest: canonicalJsonDigest(durableContext),
     },
     run: stepInput,
-    messages: [
-      { role: "system", content: systemPrompt },
-      ...repositoryMessages,
-      ...existingMessages,
-      { role: "user", content: `AGENCITY DURABLE RUN STEP\n${JSON.stringify(providerStep)}` },
-    ],
+    messages,
   })) as JsonValue;
+}
+
+type PreviousProviderTranscript = {
+  readonly candidate: ProviderInputCandidate;
+  readonly context: Record<string, JsonValue>;
+  readonly output: ModelEffectOutputV2;
+  readonly actionId: string;
+  readonly stepOrdinal: number;
+  readonly observationEventIds: readonly string[];
+  readonly recordIds: readonly string[];
+};
+
+function previousProviderTranscript(
+  state: AgentState,
+  events: readonly AgentEvent[],
+  run: AgentRunState,
+  stepOrdinal: number,
+): PreviousProviderTranscript | undefined {
+  if (stepOrdinal <= 1) return undefined;
+  const previousStep = run.steps.find((candidate) =>
+    candidate.ordinal === stepOrdinal - 1
+  );
+  const attempt = previousStep?.modelAttempts.at(-1);
+  if (!previousStep || !attempt) return undefined;
+  const call = state.modelCalls[attempt.callId];
+  if (!call || call.status !== "succeeded" || !call.providerInput) {
+    return undefined;
+  }
+  const contextEvent = events.find((event) =>
+    event.type === "ContextMaterialized" &&
+    (event.payload as EventPayloads["ContextMaterialized"]).contextId ===
+      attempt.contextId
+  ) as AgentEvent<"ContextMaterialized"> | undefined;
+  if (!contextEvent ||
+      !contextEvent.payload.context ||
+      typeof contextEvent.payload.context !== "object" ||
+      Array.isArray(contextEvent.payload.context)) {
+    return undefined;
+  }
+  const recordIds = events.flatMap((event) => {
+    const payload = event.payload as Record<string, JsonValue>;
+    if (event.id === contextEvent.id ||
+        payload.callId === attempt.callId ||
+        payload.stepId === previousStep.id ||
+        payload.actionId === previousStep.actionId) {
+      return [event.id];
+    }
+    return [];
+  });
+  return {
+    candidate: validateProviderInputCandidate(call.providerInput),
+    context: contextEvent.payload.context as Record<string, JsonValue>,
+    output: completedModelOutput(state, call),
+    actionId: previousStep.actionId,
+    stepOrdinal: previousStep.ordinal,
+    observationEventIds: previousStep.observationEventIds,
+    recordIds,
+  };
+}
+
+function providerTranscriptOutcomeMessages(
+  previous: PreviousProviderTranscript,
+  observations: readonly ProviderRunObservation[],
+): JsonValue[] {
+  const result = previous.output.result;
+  const observation = {
+    protocol: "agencity.provider-tool-observation.v1",
+    completedStepOrdinal: previous.stepOrdinal,
+    actionId: previous.actionId,
+    observationEventIds: observations.map((item) => item.eventId),
+    observations,
+  };
+  if (result.kind === "tool-submission") {
+    const submission = result.submission;
+    return [{
+      role: "assistant",
+      content: [{
+        type: "tool-call",
+        toolCallId: submission.providerToolCallId,
+        toolName: submission.name,
+        input: submission.input,
+      }],
+    }, {
+      role: "tool",
+      content: [{
+        type: "tool-result",
+        toolCallId: submission.providerToolCallId,
+        toolName: submission.name,
+        output: JSON.stringify(observation),
+      }],
+    }];
+  }
+  return [{
+    role: "assistant",
+    content: `AGENCITY REJECTED MODEL ACTION\n${JSON.stringify(result)}`,
+  }, {
+    role: "user",
+    content: `AGENCITY ACTION REJECTION OBSERVATION\n${JSON.stringify(observation)}`,
+  }];
+}
+
+function durableContextDelta(
+  previous: Record<string, JsonValue>,
+  current: Record<string, JsonValue>,
+): Record<string, JsonValue> {
+  const delta: Record<string, JsonValue> = {};
+  for (const key of new Set([...Object.keys(previous), ...Object.keys(current)])) {
+    if (current[key] === undefined) {
+      delta[key] = null;
+      continue;
+    }
+    if (canonicalJsonDigest(previous[key] ?? null) !==
+        canonicalJsonDigest(current[key])) {
+      delta[key] = current[key];
+    }
+  }
+  return delta;
 }
 
 type ProviderRunObservation = {
@@ -2280,6 +2545,64 @@ function providerObservation(value: JsonValue): ProviderRunObservation[] {
   }];
 }
 
+function boundedSegmentResetObservations(
+  observations: readonly ProviderRunObservation[],
+): JsonValue[] {
+  let remaining = SEGMENT_RESET_OBSERVATION_BYTES;
+  return observations.map((observation) => {
+    const serialized = JSON.stringify(observation);
+    const byteLength = new TextEncoder().encode(serialized).byteLength;
+    if (byteLength <= remaining) {
+      remaining -= byteLength;
+      return observation as unknown as JsonValue;
+    }
+    const payload = observation.payload && typeof observation.payload === "object" &&
+        !Array.isArray(observation.payload)
+      ? observation.payload as Record<string, JsonValue>
+      : {};
+    return {
+      eventId: observation.eventId,
+      type: observation.type,
+      payload: {
+        protocol: "agencity.provider-observation-summary.v1",
+        originalByteLength: byteLength,
+        sha256: sha256Text(serialized),
+        omitted: true,
+        ...(typeof payload.status === "string" ? { status: payload.status } : {}),
+        ...(typeof payload.error === "string"
+          ? { error: promptText(payload.error, RUN_TRAJECTORY_ERROR_SUMMARY_BYTES) }
+          : {}),
+        ...(Object.hasOwn(payload, "result")
+          ? { result: promptJsonIdentity(payload.result ?? null) }
+          : {}),
+        artifacts: collectObservationArtifactReferences(observation.payload),
+      },
+    };
+  });
+}
+
+function collectObservationArtifactReferences(value: JsonValue): JsonValue[] {
+  const references: JsonValue[] = [];
+  const visit = (candidate: JsonValue, depth: number): void => {
+    if (references.length >= 4 || depth > 8 || candidate === null ||
+        typeof candidate !== "object") return;
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) visit(item, depth + 1);
+      return;
+    }
+    if (typeof candidate.artifactId === "string") {
+      references.push({
+        artifactId: candidate.artifactId,
+        ...(typeof candidate.digest === "string" ? { digest: candidate.digest } : {}),
+        ...(typeof candidate.size === "number" ? { size: candidate.size } : {}),
+      });
+    }
+    for (const nested of Object.values(candidate)) visit(nested, depth + 1);
+  };
+  visit(value, 0);
+  return references;
+}
+
 function trajectoryTerminalNeedsDetailedAction(
   terminal: ProviderRunObservation | undefined,
 ): boolean {
@@ -2358,7 +2681,7 @@ function trajectoryOutcome(
       status: "committed",
       eventId: observation.eventId,
       ...(detail === "observation-reference"
-        ? { details: "run.observations" }
+        ? { details: "segment.observations" }
         : {
             result: promptJsonIdentity(payload.result ?? null),
             ...trajectoryEffectSummary(payload.effectManifest),
@@ -2369,7 +2692,7 @@ function trajectoryOutcome(
     status: observation.type === "CellFailed" ? "failed" : "abandoned",
     eventId: observation.eventId,
     ...(detail === "observation-reference"
-      ? { details: "run.observations" }
+        ? { details: "segment.observations" }
       : {
           ...(typeof payload.error === "string"
             ? {

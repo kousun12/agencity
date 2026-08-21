@@ -122,16 +122,16 @@ describe("installed explicit AI and typed agent invocations", () => {
         };
       `),
       probe => {
-        expect(probe.lastUserText).toContain('"rawText":"Two exact failures were supplied."');
-        expect(probe.lastUserText).toContain('"complete":false');
-        expect(probe.lastUserText).toContain('"text":"child text report"');
-        expect(probe.lastUserText).toContain('"ready":true');
-        expect(probe.lastUserText).toContain('"detachedStatus":"succeeded"');
-        expect(probe.lastUserText).toContain('"detachedHandle":{"taskId":"task-');
-        expect(probe.lastUserText).toContain('"detachedResultMethod":"function"');
-        expect(probe.lastUserText).toContain('"serializedDetachedHasResult":false');
-        expect(probe.lastUserText).toContain('"rlm":"undefined"');
-        expect(probe.lastUserText).toContain('"sdkRlm":"undefined"');
+        expect(probe.allMessageText).toContain('"rawText":"Two exact failures were supplied."');
+        expect(probe.allMessageText).toContain('"complete":false');
+        expect(probe.allMessageText).toContain('"text":"child text report"');
+        expect(probe.allMessageText).toContain('"ready":true');
+        expect(probe.allMessageText).toContain('"detachedStatus":"succeeded"');
+        expect(probe.allMessageText).toContain('"detachedHandle":{"taskId":"task-');
+        expect(probe.allMessageText).toContain('"detachedResultMethod":"function"');
+        expect(probe.allMessageText).toContain('"serializedDetachedHasResult":false');
+        expect(probe.allMessageText).toContain('"rlm":"undefined"');
+        expect(probe.allMessageText).toContain('"sdkRlm":"undefined"');
         return action("final", "explicit generation and typed agents completed");
       },
     ]);
@@ -319,7 +319,7 @@ describe("installed explicit AI and typed agent invocations", () => {
           }
         `),
         probe => {
-          expect(probe.lastUserText).toContain("CONSOLE_CAPACITY_EXCEEDED");
+          expect(probe.allMessageText).toContain("CONSOLE_CAPACITY_EXCEEDED");
           return action("failed", "nested capacity was refused before admission");
         },
       ]);

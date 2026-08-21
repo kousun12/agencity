@@ -157,6 +157,8 @@ The picker loads the configured Gateway-compatible `/v1/models` catalog without 
 
 Saved keys take precedence over `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `AI_GATEWAY_API_KEY`. Endpoint overrides are `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, and `AI_GATEWAY_BASE_URL`. A service already running keeps its inherited environment; shut it down before relying on changed environment variables.
 
+Direct OpenAI uses the Responses API with `store: false` and no `previous_response_id`. Autonomous requests use a session/branch-stable deterministic cache key, explicit mode, a 30-minute TTL, explicit supported text-boundary breakpoints, fixed required tool schema/order, and disabled parallel calls.
+
 Never place raw keys in events, prompts, task text, workspace files, artifacts, profile preferences, opaque-reference labels, or incident logs. The owner-only `auth.json` is a local credential file, not a hostile-code secret vault. Cancelling model selection after credential entry does not roll back the stored key.
 
 A resumed non-Echo branch retains its committed model. If that provider is unavailable, restore the provider configuration or inspect the branch without running model work. Start `agencity new --model PROVIDER:MODEL` to use another model for new work. Retained internal Echo branches use the explicit compatibility migration to a selected product model; they are not silently treated as ordinary product branches.
@@ -208,7 +210,9 @@ Shell and file helpers return `agencity.bounded-output.v1`. Shell retains comple
 
 The runtime also limits automatic provider observations to 56 KiB per item and 64 KiB per dependent step. The complete `AgentRunStepStarted.observationEventIds` ledger remains canonical; the bounded provider projection is not evidence deletion. Use retained file-page or artifact-range guidance rather than re-running a non-idempotent effect solely to obtain omitted output.
 
-Model admission records the exact `agencity.provider-input.v1` candidate used by both estimation and execution. `/context` reports capacity and compaction provenance. Unknown provider capacity remains unknown; complete candidates above 512 KiB must compact toward 384 KiB or stop before provider dispatch. The UTF-8-bytes-per-four estimator is conservative admission evidence, not provider-reported token usage.
+Model admission records the exact `agencity.provider-input.v2` candidate used by estimation, execution, and recovery. An autonomous transcript segment grows by exact-prefix append: native assistant tool call/result messages, durable observations, changed-state deltas, and next-action messages follow the prior message list. `/context` reports capacity and compaction provenance. Compaction starts an attributable segment/cache reset and append-only growth resumes. Unknown provider capacity remains unknown; complete candidates above 512 KiB must compact toward 384 KiB or stop before provider dispatch. The UTF-8-bytes-per-four estimator is conservative admission evidence, not provider-reported token usage.
+
+For direct OpenAI, each supported next-action text block is an explicit cache breakpoint. Function-call outputs are not relied upon for cache writes. In very long segments, the provider currently considers up to its 50 most recent breakpoints for reads; prior breakpoints remain read-only and only the latest four may write on a request. Provider-reported cache read/write token counts are retained for diagnostics and do not change budget debit.
 
 ## Completion gates and blocked runs
 
@@ -338,7 +342,7 @@ Never interpret a planned, blocked, executing, or partial manifest as completed 
 
 Opening the database may apply migrations. Do not run two runtime revisions against the same writable workspace and do not hand-edit migration metadata.
 
-The current workspace format accepts only event schema version 5 and reducer version 21. Workspace histories containing schema version 1, 2, 3, or 4 are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. Starting with a fresh state directory creates schema-version-5 sessions with complete initial profiles, typed effect origins, managed-process lifecycle records, and exact provider-input admission; the rejection does not delete retained data. See [Data lifecycle](./data-lifecycle.md).
+The current workspace format accepts only event schema version 6 and reducer version 22. This is an explicit pre-release reset boundary: workspace histories containing schema version 1, 2, 3, 4, or 5 are rejected before product migration, decoding, projection, synchronization, or recovery. Back up or move aside an incompatible workspace `.agencity` directory before opening it with this format. Starting with a fresh state directory creates schema-version-6 sessions with complete initial profiles, typed effect origins, managed-process lifecycle records, and exact provider-input-v2 admission; the rejection does not delete retained data. See [Data lifecycle](./data-lifecycle.md).
 
 ## Security checklist
 

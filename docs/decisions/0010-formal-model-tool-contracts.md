@@ -37,7 +37,7 @@ Supplemental provider narration is bounded diagnostic evidence only. It is never
 
 Tool-input stream deltas are provisional and private. Stream callbacks may report only bounded phase, sealed tool name, or byte-count progress. They cannot execute, enter conversation history, or become durable accepted input. Text operations whose result is genuinely text may continue to stream provisional text.
 
-Model requests use declaration-only tools and one generation. There is no provider-hosted execution, provider-managed action loop, or tool-result continuation.
+Each model step uses declaration-only tools and one generation. Agencity executes the accepted call; there is no provider-hosted execution or provider-managed action loop. A later step may carry the prior formal call and its durable result as append-only provider input, without relying on provider-side response storage or continuation identity.
 
 ### Finish and completion gates
 
@@ -59,7 +59,7 @@ Declared schemas cannot select a sealed contract, provider tool, tool policy, di
 
 ### Durable schema and recovery
 
-The accepted workspace event schema is version 5. Version-1 through version-4 workspaces are rejected with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted. Projection snapshots are rebuildable and are discarded whenever their reducer version differs from the runtime; the current reducer version belongs in the event reference rather than this decision record.
+The accepted workspace event schema is version 6. Version-1 through version-5 workspaces are rejected with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted. Projection snapshots are rebuildable and are discarded whenever their reducer version differs from the runtime; the current reducer version belongs in the event reference rather than this decision record.
 
 The retained model dispatch is `agencity.model-dispatch.v2`, and the authoritative successful effect output is `agencity.model-effect-output.v2`. One complete accepted tool input is retained in that effect output. `ModelCallCompleted`, `AgentRunActionCommitted`, and `AgentRunActionRejected` use result and input digests, provider call identity, and model-call references instead of copying the input. Rejected raw arguments are never retained in events, logs, artifacts, diagnostics, or progress.
 

@@ -81,7 +81,7 @@ describe("FU-009 installed no-ID release transcript", () => {
       JSON.stringify(item.toolNames) === JSON.stringify(["bun_console", "finish"]) &&
       item.toolChoice === "required" &&
       item.parallelToolCalls === false)).toBe(true);
-    expect(fixture.requests.find(item => item.task === task && item.step === 4)?.lastUserText).toContain("AgentRunGoalCheckRecorded");
+    expect(fixture.requests.find(item => item.task === task && item.step === 4)?.allMessageText).toContain("AgentRunGoalCheckRecorded");
     const childInitial = await fixture.waitFor("acceptance child initial");
     expect(fixture.count("acceptance child initial")).toBe(1);
     expect(childInitial).toMatchObject({
@@ -148,12 +148,14 @@ describe("FU-009 installed no-ID release transcript", () => {
         return output;
       `),
       probe => {
-        expect(probe.lastUserText).toContain('"completeness":"spilled"');
-        expect(probe.lastUserText).toContain("artifacts.readRange(artifactId, start, end)");
-        expect(probe.lastUserText).toContain('"head":"');
-        expect(probe.lastUserText).toContain('"tail":"');
-        const artifactId = probe.lastUserText.match(/sha256:[a-f0-9]{64}/)?.[0];
-        const stdoutEnd = probe.lastUserText.match(
+        expect(probe.allMessageText).toContain('"completeness":"spilled"');
+        expect(probe.allMessageText).toContain("artifacts.readRange(artifactId, start, end)");
+        expect(probe.allMessageText).toContain('"head":"');
+        expect(probe.allMessageText).toContain('"tail":"');
+        const artifactId = probe.allMessageText.match(
+          /"artifact":\{"artifactId":"(sha256:[a-f0-9]{64})"/,
+        )?.[1];
+        const stdoutEnd = probe.allMessageText.match(
           /"layout":\{"stdout":\{"start":0,"end":([0-9]+)/,
         )?.[1];
         if (!artifactId || !stdoutEnd) {
@@ -178,8 +180,8 @@ describe("FU-009 installed no-ID release transcript", () => {
         `);
       },
       probe => {
-        expect(probe.lastUserText).toContain('"completeness":"inline"');
-        expect(probe.lastUserText).toContain('"recoveredTail":true');
+        expect(probe.allMessageText).toContain('"completeness":"inline"');
+        expect(probe.allMessageText).toContain('"recoveredTail":true');
         return action("final", "large shell output was bounded and its exact tail was verified");
       },
     ]);
@@ -230,8 +232,8 @@ describe("FU-009 installed no-ID release transcript", () => {
         return { retainedRows: replRows.length, durableKeys: 1 };
       `),
       probe => {
-        expect(probe.lastUserText).toContain('"retainedRows":2048');
-        expect(probe.lastUserText.length).toBeLessThan(100_000);
+        expect(probe.allMessageText).toContain('"retainedRows":2048');
+        expect(probe.allMessageText.length).toBeLessThan(100_000);
         return action("typescript", String.raw`
           const warmIdentity = replIdentity === replAlias;
           const transformed = replTransform(replRows[10]);
@@ -244,10 +246,10 @@ describe("FU-009 installed no-ID release transcript", () => {
         `);
       },
       probe => {
-        expect(probe.lastUserText).toContain('"bindingsAvailable":true');
-        expect(probe.lastUserText).toContain('"warmIdentity":true');
-        expect(probe.lastUserText).toContain('"transformed":34');
-        expect(probe.lastUserText).toContain('"retainedRows":2048');
+        expect(probe.allMessageText).toContain('"bindingsAvailable":true');
+        expect(probe.allMessageText).toContain('"warmIdentity":true');
+        expect(probe.allMessageText).toContain('"transformed":34');
+        expect(probe.allMessageText).toContain('"retainedRows":2048');
         return action("final", "warm REPL bindings and object identity persisted with compact observations");
       },
     ]);
@@ -268,9 +270,9 @@ describe("FU-009 installed no-ID release transcript", () => {
         };
       `),
       probe => {
-        expect(probe.lastUserText).toContain('"parentBindingsMissing":true');
-        expect(probe.lastUserText).toContain('"forkSeed":99');
-        expect(probe.lastUserText).toContain('"forkValue":100');
+        expect(probe.allMessageText).toContain('"parentBindingsMissing":true');
+        expect(probe.allMessageText).toContain('"forkSeed":99');
+        expect(probe.allMessageText).toContain('"forkValue":100');
         return action("final", "fork REPL namespace remained isolated");
       },
     ]);
@@ -298,11 +300,11 @@ describe("FU-009 installed no-ID release transcript", () => {
         };
       `),
       probe => {
-        expect(probe.lastUserText).toContain('"warmBindingsGone":true');
-        expect(probe.lastUserText).toContain('"reconstructedSeed":7');
-        expect(probe.lastUserText).toContain('"reconstructedRows":2048');
-        expect(probe.lastUserText).toContain('"rebuiltValue":14');
-        expect(probe.lastUserText).toContain('"durableStateNames":["repl-rebuild-input"]');
+        expect(probe.allMessageText).toContain('"warmBindingsGone":true');
+        expect(probe.allMessageText).toContain('"reconstructedSeed":7');
+        expect(probe.allMessageText).toContain('"reconstructedRows":2048');
+        expect(probe.allMessageText).toContain('"rebuiltValue":14');
+        expect(probe.allMessageText).toContain('"durableStateNames":["repl-rebuild-input"]');
         return action("final", "warm REPL bindings were gone and required input was reconstructed from durable state");
       },
     ]);

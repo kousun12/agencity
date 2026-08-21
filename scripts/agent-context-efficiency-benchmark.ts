@@ -2,6 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AGENT_ACTION_PROTOCOL,
+  AGENT_ACTION_VERSION,
   AGENT_TOOL_CONTRACT_ID,
   OUTPUT_LIMITS,
   PROVIDER_INPUT_ESTIMATOR_ID,
@@ -11,13 +13,16 @@ import {
   resolveBuiltInModelResponseContract,
   resolveModelDispatch,
   type AgentEvent,
+  type AgentAction,
   type AgentRunState,
   type JsonValue,
   type ModelDispatch,
+  type ProviderInputCandidate,
   type ProviderInputCapacityProvenance,
 } from "../src/domain/index.ts";
 import { LocalArtifactStore } from "../src/artifacts/index.ts";
 import { ShellExecutor } from "../src/executors/index.ts";
+import { formalOutputFromAgentAction } from "../src/executors/model-response.ts";
 import {
   agentProviderContext,
   boundedActiveRunProjection,
@@ -123,7 +128,7 @@ function event(
     causationId: null,
     correlationId: null,
     type,
-    schemaVersion: 5,
+    schemaVersion: 6,
     committedAt: "2026-08-10T00:00:00.000Z",
     producer: "benchmark",
     idempotencyKey: null,
@@ -132,55 +137,6 @@ function event(
     originSequence: index,
     streamParentId: index === 1 ? null : `event-${index - 1}`,
   } as AgentEvent;
-}
-
-function observationsForStep(
-  step: number,
-  shellOutput: JsonValue,
-): {
-  derived: ReturnType<typeof deriveAgentProviderObservations>;
-  raw: JsonValue[];
-} {
-  if (step === 1) return { derived: [], raw: [] };
-  const cellId = `cell-${step - 1}`;
-  const effectId = `shell-effect-${step - 1}`;
-  const events = [
-    event(`request-${step}`, "EffectRequested", {
-      effectId,
-      executor: "shell",
-      operation: "run",
-      input: { command: "produce deterministic large output" },
-      origin: { kind: "cell", cellId },
-      idempotencyKey: `shell-${step}`,
-      idempotent: false,
-    }, 1),
-    event(`attempt-${step}`, "EffectAttemptStarted", { effectId, attempt: 1 }, 2),
-    event(`outcome-${step}`, "EffectOutcomeRecorded", {
-      effectId,
-      attempt: 1,
-      outcome: "succeeded",
-      output: shellOutput,
-      observedAt: "2026-08-10T00:00:00.000Z",
-    }, 3),
-    event(`cell-${step}`, "CellCommitted", {
-      cellId,
-      result: shellOutput,
-      logs: [],
-      durationMs: 1,
-      exports: [],
-    }, 4),
-  ];
-  const selected = events.filter((item) =>
-    item.type === "EffectOutcomeRecorded" || item.type === "CellCommitted");
-  const observationIds = selected.map((item) => item.id);
-  return {
-    derived: deriveAgentProviderObservations(events, observationIds),
-    raw: selected.map((item) => JSON.parse(JSON.stringify({
-      eventId: item.id,
-      type: item.type,
-      payload: item.payload,
-    })) as JsonValue),
-  };
 }
 
 async function largeShellEnvelope(): Promise<JsonValue> {
@@ -212,8 +168,25 @@ async function largeShellEnvelope(): Promise<JsonValue> {
   }
 }
 
-const RUN_STEP_PREFIX = "AGENCITY DURABLE RUN STEP\n";
+const RUN_TRANSCRIPT_PREFIX = "AGENCITY DURABLE RUN TRANSCRIPT\n";
+const RUN_STEP_PREFIX = "AGENCITY NEXT ACTION\n";
+const STATE_DELTA_PREFIX = "AGENCITY DURABLE STATE DELTA\n";
+const HISTORICAL_CACHE_PLATEAU_TOKENS = 2_496;
+const REQUIRED_REUSED_INPUT_RATIO = 0.90;
+const LONG_RUN_COUNT = 3;
+const LONG_RUN_STEPS = 24;
+const LONG_SYSTEM_PROMPT = `${SYSTEM_PROMPT}\n${
+  "Retain attributable evidence, use one formal action, and verify measured progress. ".repeat(190)
+}`;
 
+type DerivedObservations = ReturnType<typeof deriveAgentProviderObservations>;
+type TranscriptFrame = {
+  readonly candidate: ProviderInputCandidate;
+  readonly context: Record<string, JsonValue>;
+  readonly output: ReturnType<typeof formalOutputFromAgentAction>;
+  readonly actionId: string;
+  readonly stepOrdinal: number;
+};
 type FormalDecision = {
   readonly tool: "bun_console" | "finish";
   readonly reason: "initial" | "inspect-artifact" | "repair-failure" | "verified";
@@ -230,18 +203,77 @@ function record(value: unknown): Record<string, JsonValue> {
     : {};
 }
 
-function providerStep(
-  candidate: ReturnType<typeof buildProviderInputCandidate>,
+function requireCheck(
+  condition: unknown,
+  label: string,
+  checks?: string[],
+): asserts condition {
+  if (!condition) throw new Error(`Context-efficiency check failed: ${label}`);
+  checks?.push(label);
+}
+
+function parseTextMessage(
+  candidate: ProviderInputCandidate,
+  prefix: string,
+  position: "first" | "last" = "last",
 ): Record<string, JsonValue> {
-  const message = [...candidate.messages].reverse().find((item) =>
-    item.role === "user" && item.content.startsWith(RUN_STEP_PREFIX));
-  if (!message) throw new Error("Provider input omitted the durable run step");
-  const parsed = JSON.parse(message.content.slice(RUN_STEP_PREFIX.length)) as JsonValue;
-  const step = record(parsed);
-  if (!step.run || typeof step.run !== "object" || Array.isArray(step.run)) {
-    throw new Error("Provider input durable run step is malformed");
+  const ordered = position === "last"
+    ? [...candidate.messages].reverse()
+    : [...candidate.messages];
+  const message = ordered.find((item) =>
+    item.kind === "text" && item.content.startsWith(prefix));
+  if (!message || message.kind !== "text") {
+    throw new Error(`Provider input omitted ${prefix.trim()}`);
+  }
+  return record(JSON.parse(message.content.slice(prefix.length)) as JsonValue);
+}
+
+function providerStep(candidate: ProviderInputCandidate): Record<string, JsonValue> {
+  const step = parseTextMessage(candidate, RUN_STEP_PREFIX);
+  if (typeof step.stepOrdinal !== "number") {
+    throw new Error("Provider input next-action message is malformed");
   }
   return step;
+}
+
+function transcriptBoundary(candidate: ProviderInputCandidate): Record<string, JsonValue> {
+  return parseTextMessage(candidate, RUN_TRANSCRIPT_PREFIX, "first");
+}
+
+function stateDeltas(candidate: ProviderInputCandidate): Record<string, JsonValue>[] {
+  return candidate.messages.flatMap((message) =>
+    message.kind === "text" && message.content.startsWith(STATE_DELTA_PREFIX)
+      ? [record(JSON.parse(message.content.slice(STATE_DELTA_PREFIX.length)) as JsonValue)]
+      : []);
+}
+
+function toolCalls(candidate: ProviderInputCandidate): Array<{
+  readonly callId: string;
+  readonly name: string;
+  readonly input: JsonValue;
+}> {
+  return candidate.messages.flatMap((message) =>
+    message.kind === "assistant-tool-call"
+      ? [{ callId: message.callId, name: message.name, input: message.input }]
+      : []);
+}
+
+function toolObservationGroups(candidate: ProviderInputCandidate): Array<{
+  readonly completedStepOrdinal: number;
+  readonly actionId: string;
+  readonly observations: Record<string, JsonValue>[];
+}> {
+  return candidate.messages.flatMap((message) => {
+    if (message.kind !== "tool-result") return [];
+    const value = record(JSON.parse(message.content) as JsonValue);
+    return [{
+      completedStepOrdinal: Number(value.completedStepOrdinal),
+      actionId: String(value.actionId),
+      observations: Array.isArray(value.observations)
+        ? value.observations.map(record)
+        : [],
+    }];
+  });
 }
 
 function artifactReference(value: JsonValue): FormalDecision["artifact"] | undefined {
@@ -271,34 +303,26 @@ function artifactReference(value: JsonValue): FormalDecision["artifact"] | undef
 }
 
 /**
- * This intentionally small contract decides only from the exact normalized
- * provider messages. It fails if context reduction removes a fact required for
- * the next formal action; it is not a model-quality simulation.
+ * This deterministic reader uses only normalized provider messages. It checks
+ * discoverability of formal decision facts; it does not simulate model quality.
  */
-function nextFormalAction(
-  candidate: ReturnType<typeof buildProviderInputCandidate>,
-): FormalDecision {
-  const run = record(providerStep(candidate).run);
-  const observations = Array.isArray(run.observations)
-    ? run.observations.map(record)
-    : [];
-  const failed = observations.some((observation) => {
+function nextFormalAction(candidate: ProviderInputCandidate): FormalDecision {
+  const latest = toolObservationGroups(candidate).at(-1);
+  if (!latest) return { tool: "bun_console", reason: "initial" };
+  const failed = latest.observations.some((observation) => {
     const payload = record(observation.payload);
     return observation.type === "CellFailed" ||
-      (observation.type === "EffectOutcomeRecorded" &&
-        payload.outcome === "failed");
+      (observation.type === "EffectOutcomeRecorded" && payload.outcome === "failed");
   });
   if (failed) return { tool: "bun_console", reason: "repair-failure" };
-
-  const committed = [...observations].reverse().find((observation) =>
+  const committed = [...latest.observations].reverse().find((observation) =>
     observation.type === "CellCommitted");
   const result = record(record(committed?.payload).result);
   if (result.phase === "verified") return { tool: "finish", reason: "verified" };
-  const artifact = artifactReference(result as JsonValue);
-  if (artifact) {
-    return { tool: "bun_console", reason: "inspect-artifact", artifact };
-  }
-  return { tool: "bun_console", reason: "initial" };
+  const artifact = artifactReference(result);
+  return artifact
+    ? { tool: "bun_console", reason: "inspect-artifact", artifact }
+    : { tool: "bun_console", reason: "initial" };
 }
 
 function semanticCellObservations(input: {
@@ -313,10 +337,7 @@ function semanticCellObservations(input: {
     readonly output?: JsonValue;
     readonly error?: string;
   };
-}): {
-  readonly events: AgentEvent[];
-  readonly derived: ReturnType<typeof deriveAgentProviderObservations>;
-} {
+}): DerivedObservations {
   const actionId = `action-${input.step}`;
   const cellId = `agent-run-cell-${actionId}`;
   const events: AgentEvent[] = [];
@@ -370,54 +391,105 @@ function semanticCellObservations(input: {
     events.length + 1,
   ));
   selectedIds.push(terminalId);
+  return deriveAgentProviderObservations(events, selectedIds);
+}
+
+function actionForStep(step: number, source?: string): AgentAction {
   return {
-    events,
-    derived: deriveAgentProviderObservations(events, selectedIds),
+    protocol: AGENT_ACTION_PROTOCOL,
+    version: AGENT_ACTION_VERSION,
+    type: "typescript",
+    code: source ??
+      `// Purpose: retain measured sample ${step}.\nreturn { sample: ${step}, xpPerMinute: ${40 + step}, accepted: true };`,
   };
 }
 
-function semanticCandidate(input: {
+function semanticFrame(input: {
   readonly run: AgentRunState;
   readonly step: number;
-  readonly observations: ReturnType<typeof deriveAgentProviderObservations>;
-  readonly recentActivity?: readonly JsonValue[];
-}): ReturnType<typeof buildProviderInputCandidate> {
+  readonly observations: DerivedObservations;
+  readonly action?: AgentAction;
+  readonly previous?: TranscriptFrame;
+  readonly resetReason?: string;
+  readonly systemPrompt?: string;
+  readonly base?: Record<string, JsonValue>;
+}): TranscriptFrame {
+  const action = input.action ?? actionForStep(input.step);
   const context = agentProviderContext(
     {
       activeRuns: [boundedActiveRunProjection(input.run)],
-      messages: [{ role: "user", content: TASK }],
-      recentActivity: [...(input.recentActivity ?? [])],
+      messages: [{ role: "user", content: input.run.task }],
+      ...(input.base ?? {}),
     },
     input.run,
     input.step,
     input.observations,
     modelDispatch,
-    SYSTEM_PROMPT,
-  );
-  return buildProviderInputCandidate({
+    input.systemPrompt ?? SYSTEM_PROMPT,
+    undefined,
+    Date.parse("2026-08-20T12:00:00.000Z") + input.step * 1_000,
+    input.resetReason === undefined
+      ? input.previous === undefined
+        ? {}
+        : {
+            previousTranscript: {
+              candidate: input.previous.candidate,
+              context: input.previous.context,
+              output: input.previous.output,
+              actionId: input.previous.actionId,
+              stepOrdinal: input.previous.stepOrdinal,
+              observationEventIds: input.observations.map((item) => item.eventId),
+              recordIds: [],
+            },
+          }
+      : { resetReason: input.resetReason },
+  ) as Record<string, JsonValue>;
+  const candidate = buildProviderInputCandidate({
     context,
     modelDispatch,
     capacity,
   });
+  return {
+    candidate,
+    context,
+    output: formalOutputFromAgentAction({
+      action,
+      dispatch: modelDispatch,
+      providerToolCallId: `benchmark-tool-call-${input.run.id}-${input.step}`,
+      provider: capacity.provider,
+      adapter: "fixture.context-efficiency.v1",
+      usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+    }),
+    actionId: `action-${input.step}`,
+    stepOrdinal: input.step,
+  };
 }
 
-function verifyDecisionContract(shellOutput: JsonValue): {
-  readonly protocol: string;
-  readonly checks: readonly string[];
-  readonly scenarios: readonly Record<string, JsonValue>[];
-  readonly passed: true;
-  readonly limitation: string;
-} {
-  const checks: string[] = [];
-  const require = (condition: unknown, label: string): void => {
-    if (!condition) throw new Error(`Semantic preservation check failed: ${label}`);
-    checks.push(label);
-  };
-  const requiredTools = ["bun_console", "finish"];
+function strictMessagePrefix(
+  previous: ProviderInputCandidate,
+  current: ProviderInputCandidate,
+): boolean {
+  if (current.messages.length <= previous.messages.length) return false;
+  return JSON.stringify(current.messages.slice(0, previous.messages.length)) ===
+    JSON.stringify(previous.messages);
+}
 
+function messageBytes(candidate: ProviderInputCandidate): number {
+  return encoder.encode(JSON.stringify(candidate.messages)).byteLength;
+}
+
+function verifyDecisionContract(shellOutput: JsonValue) {
+  const checks: string[] = [];
+  const requiredTools = ["bun_console", "finish"];
   const prepareSource =
     "// Purpose: inspect the retained spill before deciding completion.\nreturn { prepared: true };";
-  const continuationRun = benchmarkRun([prepareSource]);
+  const initial = semanticFrame({
+    run: benchmarkRun([]),
+    step: 1,
+    observations: [],
+    action: actionForStep(1, prepareSource),
+    base: { workingValues: { strategy: { version: 1, phase: "prepare" } } },
+  });
   const continuationObservations = semanticCellObservations({
     step: 1,
     terminal: "CellCommitted",
@@ -429,52 +501,68 @@ function verifyDecisionContract(shellOutput: JsonValue): {
       output: shellOutput,
     },
   });
-  const continuation = semanticCandidate({
-    run: continuationRun,
+  const failedSource =
+    "// Purpose: repair the exact source location reported by validation.\nthrow new Error('fixture');";
+  const continuation = semanticFrame({
+    run: benchmarkRun([prepareSource]),
     step: 2,
-    observations: continuationObservations.derived,
+    observations: continuationObservations,
+    previous: initial,
+    action: actionForStep(2, failedSource),
+    base: { workingValues: { strategy: { version: 2, phase: "inspect-spill" } } },
   });
-  const continuationStep = record(providerStep(continuation).run);
-  const continuationTrajectory = Array.isArray(continuationStep.recentTrajectory)
-    ? continuationStep.recentTrajectory.map(record)
+  const boundary = transcriptBoundary(continuation.candidate);
+  const continuationStep = providerStep(continuation.candidate);
+  const continuationCalls = toolCalls(continuation.candidate);
+  const continuationGroups = toolObservationGroups(continuation.candidate);
+  const continuationGroup = continuationGroups.at(-1)!;
+  const continuationCell = continuationGroup.observations.find((item) =>
+    item.type === "CellCommitted");
+  const continuationManifest = Array.isArray(record(continuationCell?.payload).effectManifest)
+    ? (record(continuationCell?.payload).effectManifest as JsonValue[]).map(record)
     : [];
-  const continuationObservation = (Array.isArray(continuationStep.observations)
-    ? continuationStep.observations.map(record)
-    : []).find((item) => item.type === "CellCommitted");
-  const continuationPayload = record(continuationObservation?.payload);
-  const continuationManifest = Array.isArray(continuationPayload.effectManifest)
-    ? continuationPayload.effectManifest.map(record)
-    : [];
-  const continuationDecision = nextFormalAction(continuation);
-  require(continuation.tools.map((tool) => tool.name).join(",") === requiredTools.join(","),
-    "formal tool set is bun_console then finish");
-  require(continuationStep.runId === "benchmark-run" &&
-    continuationStep.task === TASK && continuationStep.stepOrdinal === 2,
-  "continuation preserves run, task, and step identity");
-  require(continuationTrajectory.map((item) => item.ordinal).join(",") === "1",
-    "continuation preserves trajectory order");
-  require(typeof record(record(continuationTrajectory[0]?.action).source).sha256 === "string" &&
-    record(continuationTrajectory[0]?.outcome).status === "committed",
-  "continuation preserves compact action and outcome facts");
-  require(continuationManifest.length === 1 &&
+  const continuationDecision = nextFormalAction(continuation.candidate);
+  requireCheck(strictMessagePrefix(initial.candidate, continuation.candidate),
+    "continuation messages retain an exact strict prefix", checks);
+  requireCheck(boundary.protocol === "agencity.provider-transcript.v1" &&
+    boundary.runId === "benchmark-run" &&
+    record(boundary.durableContext).activeRuns !== undefined,
+  "initial transcript retains attributable run and durable context", checks);
+  requireCheck(continuationStep.runId === "benchmark-run" &&
+    continuationStep.task === TASK &&
+    continuationStep.stepOrdinal === 2 &&
+    Array.isArray(continuationStep.observationEventIds),
+  "next-action message retains run, task, ordinal, and observation ids", checks);
+  requireCheck(continuationCalls.length === 1 &&
+    continuationCalls[0]?.name === "bun_console" &&
+    String(record(continuationCalls[0]?.input).source).includes("inspect the retained spill"),
+  "assistant tool call retains the exact formal action", checks);
+  requireCheck(continuationGroup.completedStepOrdinal === 1 &&
+    continuationGroup.actionId === "action-1" &&
+    continuationGroup.observations.some((item) => item.type === "CellCommitted"),
+  "tool result retains exact completed-step observations", checks);
+  requireCheck(stateDeltas(continuation.candidate).some((delta) =>
+    record(delta.changed).workingValues !== undefined),
+  "changed durable state is appended as a state delta", checks);
+  requireCheck(continuation.candidate.tools.map((tool) => tool.name).join(",") ===
+    requiredTools.join(",") &&
+    initial.candidate.tools.map((tool) => tool.name).join(",") === requiredTools.join(","),
+  "formal tool set and order remain bun_console then finish", checks);
+  requireCheck(continuationManifest.length === 1 &&
     continuationManifest[0]?.executor === "shell" &&
     continuationManifest[0]?.operation === "run" &&
     continuationManifest[0]?.terminalStatus === "succeeded" &&
     continuationManifest[0]?.attemptCount === 1,
-  "cell owns the successful effect manifest");
-  require(!(Array.isArray(continuationStep.observations)
-    ? continuationStep.observations.map(record)
-    : []).some((item) => item.type === "EffectOutcomeRecorded"),
-  "successful effect output is not duplicated");
-  require(continuationDecision.tool === "bun_console" &&
+  "cell owns the successful effect manifest", checks);
+  requireCheck(!continuationGroup.observations.some((item) =>
+    item.type === "EffectOutcomeRecorded"),
+  "successful effect payload is not duplicated", checks);
+  requireCheck(continuationDecision.tool === "bun_console" &&
     continuationDecision.reason === "inspect-artifact" &&
     continuationDecision.artifact?.artifactId ===
       record(record(shellOutput).artifact).artifactId,
-  "artifact reference selects bun_console continuation");
+  "artifact evidence selects bun_console continuation", checks);
 
-  const failedSource =
-    "// Purpose: repair the exact source location reported by validation.\nthrow new Error('fixture');";
-  const recoveryRun = benchmarkRun([prepareSource, failedSource]);
   const failedError = "src/page.ts:42:7 validation failed";
   const failureObservations = semanticCellObservations({
     step: 2,
@@ -487,70 +575,66 @@ function verifyDecisionContract(shellOutput: JsonValue): {
       error: failedError,
     },
   });
-  const recovery = semanticCandidate({
-    run: recoveryRun,
+  const recovery = semanticFrame({
+    run: benchmarkRun([prepareSource, failedSource]),
     step: 3,
-    observations: failureObservations.derived,
-    recentActivity: continuationObservations.derived as unknown as JsonValue[],
+    observations: failureObservations,
+    previous: continuation,
+    action: actionForStep(3),
+    base: { workingValues: { strategy: { version: 3, phase: "repair" } } },
   });
-  const recoveryStep = record(providerStep(recovery).run);
-  const recoveryTrajectory = Array.isArray(recoveryStep.recentTrajectory)
-    ? recoveryStep.recentTrajectory.map(record)
-    : [];
-  const recoveryObservations = Array.isArray(recoveryStep.observations)
-    ? recoveryStep.observations.map(record)
-    : [];
-  const failedEffect = recoveryObservations.find((item) =>
+  const recoveryCalls = toolCalls(recovery.candidate);
+  const recoveryGroup = toolObservationGroups(recovery.candidate).at(-1)!;
+  const failedEffect = recoveryGroup.observations.find((item) =>
     item.type === "EffectOutcomeRecorded");
-  const recoveryDecision = nextFormalAction(recovery);
-  require(recoveryStep.runId === "benchmark-run" &&
-    recoveryStep.task === TASK && recoveryStep.stepOrdinal === 3,
-  "recovery preserves run, task, and step identity");
-  require(recoveryTrajectory.map((item) => item.ordinal).join(",") === "1,2",
-    "recovery preserves action order");
-  require(typeof record(record(recoveryTrajectory[0]?.action).source).sha256 === "string" &&
-    Array.isArray(record(recoveryTrajectory[0]?.outcome).effects),
-  "recovery preserves prior compact action, result, and effect facts");
-  require(String(record(record(recoveryTrajectory[1]?.action).source).text)
-    .includes("repair the exact source location") &&
-    record(recoveryTrajectory[1]?.outcome).status === "failed",
-  "recovery preserves latest failed action and outcome");
-  require(String(record(failedEffect?.payload).error).includes("src/page.ts:42:7") &&
+  const recoveryStep = providerStep(recovery.candidate);
+  const recoveryDecision = nextFormalAction(recovery.candidate);
+  requireCheck(strictMessagePrefix(continuation.candidate, recovery.candidate),
+    "recovery messages retain the prior candidate as an exact strict prefix", checks);
+  requireCheck(recoveryCalls.length === 2 &&
+    String(record(recoveryCalls[1]?.input).source).includes("repair the exact source location"),
+  "appended assistant calls preserve formal action order", checks);
+  requireCheck(String(record(failedEffect?.payload).error).includes("src/page.ts:42:7") &&
     String(record(failedEffect?.payload).guidance).includes("adjust the next action"),
-  "recovery preserves actionable failure and effect guidance");
-  require(String(recoveryStep.instruction).includes("small surrounding range") &&
+  "failed tool result retains actionable bounded diagnostics", checks);
+  requireCheck(String(recoveryStep.instruction).includes("small surrounding range") &&
     String(recoveryStep.instruction).includes("Call bun_console"),
-  "recovery preserves bounded repair guidance");
-  require(recoveryDecision.tool === "bun_console" &&
+  "next-action message retains bounded repair guidance", checks);
+  requireCheck(recoveryDecision.tool === "bun_console" &&
     recoveryDecision.reason === "repair-failure",
-  "failure selects bun_console repair");
+  "failure evidence selects bun_console repair", checks);
 
-  const completionRun = benchmarkRun([
-    "// Purpose: verify the artifact-backed result.\nreturn { phase: 'verified' };",
-  ]);
-  const completionObservations = semanticCellObservations({
+  const completionInitial = semanticFrame({
+    run: benchmarkRun([]),
     step: 1,
-    terminal: "CellCommitted",
-    result: {
-      phase: "verified",
-      artifactId: continuationDecision.artifact!.artifactId,
-    },
+    observations: [],
+    action: actionForStep(
+      1,
+      "// Purpose: verify the artifact-backed result.\nreturn { phase: 'verified' };",
+    ),
   });
-  const completion = semanticCandidate({
-    run: completionRun,
+  const completion = semanticFrame({
+    run: benchmarkRun([
+      "// Purpose: verify the artifact-backed result.\nreturn { phase: 'verified' };",
+    ]),
     step: 2,
-    observations: completionObservations.derived,
+    observations: semanticCellObservations({
+      step: 1,
+      terminal: "CellCommitted",
+      result: {
+        phase: "verified",
+        artifactId: continuationDecision.artifact!.artifactId,
+      },
+    }),
+    previous: completionInitial,
   });
-  const completionStep = record(providerStep(completion).run);
-  const completionDecision = nextFormalAction(completion);
-  require(completionStep.task === TASK && completionStep.stepOrdinal === 2,
-    "completion preserves task and step identity");
-  require(completionDecision.tool === "finish" &&
+  const completionDecision = nextFormalAction(completion.candidate);
+  requireCheck(completionDecision.tool === "finish" &&
     completionDecision.reason === "verified",
-  "verified evidence selects finish");
+  "verified tool result selects finish", checks);
 
   return {
-    protocol: "agencity.context-efficiency-decision-contract.v1",
+    protocol: "agencity.context-efficiency-decision-contract.v2",
     checks,
     scenarios: [
       {
@@ -570,138 +654,243 @@ function verifyDecisionContract(shellOutput: JsonValue): {
         actual: completionDecision.tool,
       },
     ],
-    passed: true,
+    passed: true as const,
     limitation:
-      "Deterministic decision-contract equivalence is not live-model semantic equivalence.",
+      "Deterministic message-fact discoverability is not live-model semantic equivalence.",
+  };
+}
+
+function measureLongRuns() {
+  const runs: Array<Record<string, JsonValue>> = [];
+  let aggregateReusedTokens = 0;
+  let aggregateInputTokens = 0;
+  let aggregateColdStartInputTokens = 0;
+  let prefixTransitions = 0;
+  let firstReusableBytes = 0;
+  let lastReusableBytes = 0;
+  let firstReusableTokens = 0;
+  let lastReusableTokens = 0;
+
+  for (let runIndex = 0; runIndex < LONG_RUN_COUNT; runIndex++) {
+    const completedSources: string[] = [];
+    let previous: TranscriptFrame | undefined;
+    const reusableBytes: number[] = [];
+    const reusableTokens: number[] = [];
+    const inputTokens: number[] = [];
+    for (let step = 1; step <= LONG_RUN_STEPS; step++) {
+      const source =
+        `// Purpose: measure training sample ${step} for run ${runIndex + 1}.\n` +
+        `const evidence = ${JSON.stringify("accepted-progress ".repeat(18))};\n` +
+        `return { sample: ${step}, xpPerMinute: ${40 + step}, accepted: true, evidence };`;
+      const observations = step === 1
+        ? []
+        : semanticCellObservations({
+            step: step - 1,
+            terminal: "CellCommitted",
+            result: {
+              sample: step - 1,
+              xpPerMinute: 39 + step,
+              accepted: true,
+              summary: "measured progress ".repeat(12),
+            },
+          });
+      const run = {
+        ...benchmarkRun(completedSources),
+        id: `long-run-${runIndex + 1}`,
+        task: `Sustain measured deterministic training run ${runIndex + 1}.`,
+      };
+      const frame = semanticFrame({
+        run,
+        step,
+        observations,
+        ...(previous === undefined ? {} : { previous }),
+        action: actionForStep(step, source),
+        systemPrompt: LONG_SYSTEM_PROMPT,
+        base: {
+          workingValues: {
+            strategy: {
+              sample: step,
+              latestRate: 40 + step,
+              target: "sustain confirmed progress",
+            },
+          },
+        },
+      });
+      const estimate = estimateProviderInputCandidate(frame.candidate);
+      inputTokens.push(estimate.estimatedTokens);
+      if (previous === undefined) {
+        aggregateColdStartInputTokens += estimate.estimatedTokens;
+      } else {
+        requireCheck(
+          strictMessagePrefix(previous.candidate, frame.candidate),
+          `long run ${runIndex + 1} step ${step} is not a strict prefix extension`,
+        );
+        requireCheck(
+          JSON.stringify(previous.candidate.tools) === JSON.stringify(frame.candidate.tools),
+          `long run ${runIndex + 1} step ${step} changed fixed tools`,
+        );
+        const reusablePrefixBytes = messageBytes(previous.candidate);
+        const conservativeReusedTokens = Math.floor(reusablePrefixBytes / 4);
+        reusableBytes.push(reusablePrefixBytes);
+        reusableTokens.push(conservativeReusedTokens);
+        aggregateReusedTokens += conservativeReusedTokens;
+        aggregateInputTokens += estimate.estimatedTokens;
+        prefixTransitions++;
+      }
+      previous = frame;
+      completedSources.push(source);
+    }
+    requireCheck(reusableTokens.every((value, index) =>
+      index === 0 || value > reusableTokens[index - 1]!),
+    `long run ${runIndex + 1} reusable prefix did not grow monotonically`);
+    firstReusableBytes ||= reusableBytes[0]!;
+    lastReusableBytes = reusableBytes.at(-1)!;
+    firstReusableTokens ||= reusableTokens[0]!;
+    lastReusableTokens = reusableTokens.at(-1)!;
+    runs.push({
+      run: runIndex + 1,
+      steps: LONG_RUN_STEPS,
+      coldStartInputTokens: inputTokens[0]!,
+      firstReusablePrefixBytes: reusableBytes[0]!,
+      lastReusablePrefixBytes: reusableBytes.at(-1)!,
+      firstReusablePrefixTokens: reusableTokens[0]!,
+      lastReusablePrefixTokens: reusableTokens.at(-1)!,
+      lastInputTokens: inputTokens.at(-1)!,
+      strictPrefixTransitions: reusableTokens.length,
+    });
+  }
+  const reusedInputRatio = aggregateReusedTokens / aggregateInputTokens;
+  requireCheck(lastReusableTokens > HISTORICAL_CACHE_PLATEAU_TOKENS,
+    "cacheable prefix did not grow beyond the historical 2,496-token plateau");
+  requireCheck(reusedInputRatio > REQUIRED_REUSED_INPUT_RATIO,
+    `aggregate reused/input ratio ${(reusedInputRatio * 100).toFixed(2)}% is not above 90%`);
+  return {
+    runs,
+    aggregate: {
+      coldStarts: LONG_RUN_COUNT,
+      coldStartInputTokens: aggregateColdStartInputTokens,
+      coldStartsIncludedInRatio: false,
+      resetCallsIncludedInRatio: false,
+      strictPrefixTransitions: prefixTransitions,
+      conservativeReusedTokens: aggregateReusedTokens,
+      estimatedInputTokens: aggregateInputTokens,
+      reusedInputRatio: Number(reusedInputRatio.toFixed(6)),
+      reusedInputPercent: Number((reusedInputRatio * 100).toFixed(2)),
+      requiredReusedInputPercentExclusive: REQUIRED_REUSED_INPUT_RATIO * 100,
+      firstReusablePrefixBytes: firstReusableBytes,
+      lastReusablePrefixBytes: lastReusableBytes,
+      firstReusablePrefixTokens: firstReusableTokens,
+      lastReusablePrefixTokens: lastReusableTokens,
+      historicalPlateauTokens: HISTORICAL_CACHE_PLATEAU_TOKENS,
+      passed: true,
+    },
+  };
+}
+
+function verifySegmentReset() {
+  const source1 = "// Purpose: establish the first segment.\nreturn { segment: 1 };";
+  const source2 = "// Purpose: continue the first segment.\nreturn { segment: 1, step: 2 };";
+  const source3 =
+    "// Purpose: retain measured sample 3.\nreturn { sample: 3, xpPerMinute: 43, accepted: true };";
+  const initial = semanticFrame({
+    run: benchmarkRun([]),
+    step: 1,
+    observations: [],
+    action: actionForStep(1, source1),
+  });
+  const beforeReset = semanticFrame({
+    run: benchmarkRun([source1]),
+    step: 2,
+    observations: semanticCellObservations({
+      step: 1,
+      terminal: "CellCommitted",
+      result: { segment: 1 },
+    }),
+    previous: initial,
+    action: actionForStep(2, source2),
+  });
+  const resetReason = "context-efficiency-deliberate-reset";
+  const reset = semanticFrame({
+    run: benchmarkRun([source1, source2]),
+    step: 3,
+    observations: semanticCellObservations({
+      step: 2,
+      terminal: "CellCommitted",
+      result: { segment: 1, step: 2 },
+    }),
+    resetReason,
+    action: actionForStep(3),
+  });
+  const afterReset = semanticFrame({
+    run: benchmarkRun([source1, source2, source3]),
+    step: 4,
+    observations: semanticCellObservations({
+      step: 3,
+      terminal: "CellCommitted",
+      result: { segment: 2, step: 1 },
+    }),
+    previous: reset,
+    action: actionForStep(4),
+  });
+  requireCheck(strictMessagePrefix(initial.candidate, beforeReset.candidate),
+    "pre-reset candidate is not a strict prefix extension");
+  requireCheck(!strictMessagePrefix(beforeReset.candidate, reset.candidate),
+    "reset candidate unexpectedly prefixes the prior segment");
+  requireCheck(strictMessagePrefix(reset.candidate, afterReset.candidate),
+    "post-reset candidate does not prefix the reset segment");
+  requireCheck(transcriptBoundary(reset.candidate).resetReason === resetReason,
+    "reset candidate omitted its attributable reset reason");
+  requireCheck(JSON.stringify(beforeReset.candidate.tools) ===
+    JSON.stringify(reset.candidate.tools) &&
+    JSON.stringify(reset.candidate.tools) === JSON.stringify(afterReset.candidate.tools),
+  "segment reset changed fixed formal tools");
+  return {
+    protocol: "agencity.context-efficiency-segment-reset.v1",
+    resetReason,
+    transitions: [
+      { from: 1, to: 2, classification: "strict-prefix" },
+      { from: 2, to: 3, classification: "deliberate-reset-excluded" },
+      { from: 3, to: 4, classification: "strict-prefix-after-reset" },
+    ],
+    priorSegmentMessageBytes: messageBytes(beforeReset.candidate),
+    resetSegmentMessageBytes: messageBytes(reset.candidate),
+    nextSegmentMessageBytes: messageBytes(afterReset.candidate),
+    passed: true,
   };
 }
 
 const modelDispatch = dispatch();
 const shellOutput = await largeShellEnvelope();
-const completedSources: string[] = [];
-const steps: Array<Record<string, unknown>> = [];
-let baselineMessagesTotal = 0;
-let providerMessagesTotal = 0;
-
-for (let step = 1; step <= 5; step++) {
-  if (step > 1) {
-    completedSources.push(
-      `const page${step - 1} = ${JSON.stringify("<html>".repeat(1_500))}; return page${step - 1};`,
-    );
-  }
-  const run = benchmarkRun(completedSources);
-  const observations = observationsForStep(step, shellOutput);
-  const context = agentProviderContext(
-    {
-      activeRuns: [boundedActiveRunProjection(run)],
-      messages: [{ role: "user", content: TASK }],
-    },
-    run,
-    step,
-    observations.derived,
-    modelDispatch,
-    SYSTEM_PROMPT,
-  );
-  const candidate = buildProviderInputCandidate({
-    context,
-    modelDispatch,
-    capacity,
-  });
-  const estimate = estimateProviderInputCandidate(candidate);
-
-  // Captured pre-change shape: completed action source accumulated in
-  // activeRuns and successful effect output was delivered beside the cell.
-  const baselineStep = {
-    runId: run.id,
-    task: TASK,
-    stepOrdinal: step,
-    status: "running",
-    observations: observations.raw,
-    durableContext: {
-      activeRuns: [{
-        id: run.id,
-        task: TASK,
-        status: "running",
-        steps: completedSources.map((code, index) => ({
-          ordinal: index + 1,
-          action: { type: "typescript", code },
-        })),
-      }],
-    },
-  };
-  const baselineMessages: JsonValue = [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: TASK },
-    {
-      role: "user",
-      content: `AGENCITY DURABLE RUN STEP\n${JSON.stringify(baselineStep)}`,
-    },
-  ];
-  const baselineMessageBytes = canonicalJsonByteLength(baselineMessages);
-  const providerMessageBytes = canonicalJsonByteLength(
-    candidate.messages as unknown as JsonValue,
-  );
-  baselineMessagesTotal += baselineMessageBytes;
-  providerMessagesTotal += providerMessageBytes;
-
-  const automaticObservationBytesByEventType: Record<string, number> = {};
-  for (const observation of observations.derived) {
-    automaticObservationBytesByEventType[observation.type] =
-      (automaticObservationBytesByEventType[observation.type] ?? 0) +
-      encoder.encode(JSON.stringify(observation)).byteLength;
-  }
-  steps.push({
-    step,
-    completeProviderInputCandidateBytes: candidate.exactUtf8Bytes,
-    serializedProviderMessageBytes: providerMessageBytes,
-    serializedProviderRequestBytes: estimate.utf8Bytes,
-    estimatedInputTokens: estimate.estimatedTokens,
-    baselineProviderMessageBytes: baselineMessageBytes,
-    automaticObservationBytesByEventType,
-    compaction: {
-      status: "not-required",
-      capacity,
-    },
-  });
-}
-
-const reductionPercent =
-  Number(((1 - providerMessagesTotal / baselineMessagesTotal) * 100).toFixed(2));
-if (reductionPercent < 30) {
-  throw new Error(
-    `Provider-message reduction ${reductionPercent}% is below the required 30%`,
-  );
-}
-
 const semanticPreservation = verifyDecisionContract(shellOutput);
+const cacheability = measureLongRuns();
+const segmentReset = verifySegmentReset();
 const spilled = shellOutput as Record<string, JsonValue>;
 const report = {
-  protocol: "agencity.context-efficiency-benchmark.v1",
-  scenario: {
-    steps: 5,
-    baseline:
-      "Captured pre-change provider-message shape with accumulated completed action source and duplicate successful effect/cell observations.",
-  },
-  steps,
-  cumulative: {
-    baselineProviderMessageBytes: baselineMessagesTotal,
-    providerMessageBytes: providerMessagesTotal,
-    reductionPercent,
-    requiredReductionPercent: 30,
-    passed: true,
-  },
+  protocol: "agencity.context-efficiency-benchmark.v2",
+  contract: "append-only-provider-transcript",
+  deterministic: true,
+  cacheability,
+  segmentReset,
   semanticPreservation,
-  spill: {
-    completeness: spilled.completeness,
-    artifactBytes: (spilled.artifact as Record<string, JsonValue>).size,
-    previewBytes: canonicalJsonByteLength(spilled.preview!),
+  boundedContext: {
+    successfulCellEffectOwnership: "checked",
+    duplicateSuccessfulEffectPayload: false,
+    shellOutputCompleteness: spilled.completeness,
+    shellArtifactBytes: (spilled.artifact as Record<string, JsonValue>).size,
+    shellPreviewBytes: canonicalJsonByteLength(spilled.preview!),
     previewLimitBytesPerStream: OUTPUT_LIMITS.shellPreviewBytesPerStream,
     artifactRangeLimitBytes: OUTPUT_LIMITS.artifactRangeBytes,
   },
   providerReportedInputTokens: {
-    status: "skipped",
-    reason: "credential-gated live-provider verification was not enabled",
+    status: "not-measured",
+    reason: "This benchmark uses deterministic fake outputs and makes no external calls.",
   },
+  limitations: [
+    "Estimated tokens use the repository's deterministic UTF-8-bytes-per-four estimator.",
+    "Reused tokens count only the prior candidate's byte-identical message array.",
+    "Cold starts and deliberate reset calls are labeled and excluded from the reused/input ratio.",
+    "The benchmark does not simulate provider cache behavior, model quality, paid performance, or live-provider semantics.",
+  ],
 };
 
 console.log(JSON.stringify(report, null, 2));

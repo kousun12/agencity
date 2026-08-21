@@ -13,9 +13,10 @@ import {
   type ReasoningEffort,
 } from "./model.ts";
 
-export const PROVIDER_INPUT_VERSION = "agencity.provider-input.v1" as const;
+export const PROVIDER_INPUT_VERSION = "agencity.provider-input.v2" as const;
 export const PROVIDER_INPUT_ESTIMATOR_ID =
   "provider-input-utf8-bytes-per-4-tokens-v1" as const;
+export const PROVIDER_INPUT_OPENAI_CACHE_TTL = "30m" as const;
 export const UNKNOWN_CAPACITY_PROVIDER_INPUT_HARD_BYTES = 512 * 1024;
 export const UNKNOWN_CAPACITY_PROVIDER_INPUT_TARGET_BYTES = 384 * 1024;
 
@@ -31,10 +32,40 @@ export class ProviderInputProductLimitError extends Error {
   }
 }
 
-export interface ProviderInputMessage {
+export interface ProviderInputTextMessage {
+  readonly kind: "text";
   readonly role: "system" | "user" | "assistant";
   readonly content: string;
+  readonly cacheBreakpoint?: true;
 }
+
+export interface ProviderInputAssistantToolCallMessage {
+  readonly kind: "assistant-tool-call";
+  readonly callId: string;
+  readonly name: string;
+  readonly input: JsonValue;
+}
+
+export interface ProviderInputToolResultMessage {
+  readonly kind: "tool-result";
+  readonly callId: string;
+  readonly name: string;
+  readonly content: string;
+  readonly cacheBreakpoint?: true;
+}
+
+export type ProviderInputMessage =
+  | ProviderInputTextMessage
+  | ProviderInputAssistantToolCallMessage
+  | ProviderInputToolResultMessage;
+
+export type ProviderInputCacheContract =
+  | { readonly mode: "disabled" }
+  | {
+      readonly mode: "openai-explicit";
+      readonly promptCacheKey: string;
+      readonly ttl: typeof PROVIDER_INPUT_OPENAI_CACHE_TTL;
+    };
 
 export interface ProviderInputTool {
   readonly name: string;
@@ -63,6 +94,7 @@ export interface ProviderInputCandidate {
   readonly version: typeof PROVIDER_INPUT_VERSION;
   readonly messages: readonly ProviderInputMessage[];
   readonly tools: readonly ProviderInputTool[];
+  readonly cache: ProviderInputCacheContract;
   readonly policy: {
     readonly schemaEnforcement: "none" | "provider-strict" | "runtime-validated";
     readonly selection: "text" | "exactly-one-of";
@@ -139,6 +171,7 @@ export function buildProviderInputCandidate(input: {
           strict: contract.schemaEnforcement === "provider-strict",
         }))
       : [],
+    cache: deriveProviderInputCache(input.context, dispatch),
     policy: contract.kind === "required-tool-set"
       ? {
           schemaEnforcement: contract.schemaEnforcement,
@@ -219,7 +252,7 @@ export function validateProviderInputCandidate(
   assertJsonValue(value);
   const record = value as unknown as Record<string, JsonValue>;
   const allowed = new Set([
-    "version", "messages", "tools", "policy", "options", "provenance",
+    "version", "messages", "tools", "cache", "policy", "options", "provenance",
     "digest", "exactUtf8Bytes",
   ]);
   if (record.version !== PROVIDER_INPUT_VERSION ||
@@ -252,11 +285,14 @@ export function providerInputAdmission(
   candidate: ProviderInputCandidate,
   modelDispatch: ModelDispatch,
 ): ProviderInputAdmission {
-  validateProviderInputCandidate(candidate, {
-    context: { messages: candidate.messages as unknown as JsonValue },
-    modelDispatch,
-    capacity: candidate.provenance.capacity,
-  });
+  validateProviderInputCandidate(candidate);
+  validateModelDispatch(modelDispatch);
+  if (candidate.provenance.dispatchDigest !==
+      canonicalJsonDigest(modelDispatch as unknown as JsonValue)) {
+    throw new ValidationError(
+      "Provider-input admission dispatch differs from its candidate",
+    );
+  }
   return deepFreeze({
     version: candidate.version,
     digest: candidate.digest,
@@ -301,6 +337,7 @@ export function serializedProviderInput(candidate: ProviderInputCandidate): Json
   return {
     messages: cloneJson(candidate.messages as unknown as JsonValue),
     tools: cloneJson(candidate.tools as unknown as JsonValue),
+    cache: cloneJson(candidate.cache as unknown as JsonValue),
     policy: cloneJson(candidate.policy as unknown as JsonValue),
     options: cloneJson(candidate.options as unknown as JsonValue),
   };
@@ -333,22 +370,148 @@ export function normalizeProviderMessages(context: JsonValue): readonly Provider
   const raw = Array.isArray(record.messages) ? record.messages : [];
   const messages: ProviderInputMessage[] = [];
   for (const value of raw) {
-    if (!value || typeof value !== "object" || Array.isArray(value) ||
-        typeof value.content !== "string") continue;
-    if (value.role === "system") {
-      messages.push({ role: "system", content: value.content });
-    } else if (value.role === "assistant") {
-      messages.push({ role: "assistant", content: value.content });
-    } else if (value.role === "tool") {
-      messages.push({ role: "user", content: `[tool observation]\n${value.content}` });
-    } else {
-      messages.push({ role: "user", content: value.content });
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    if (value.role === "assistant" && Array.isArray(value.content)) {
+      for (const part of value.content) {
+        if (!part || typeof part !== "object" || Array.isArray(part) ||
+            part.type !== "tool-call" ||
+            typeof part.toolCallId !== "string" || !part.toolCallId ||
+            typeof part.toolName !== "string" || !part.toolName ||
+            !Object.hasOwn(part, "input")) {
+          throw new ValidationError(
+            "Provider-input assistant tool-call content is invalid",
+          );
+        }
+        assertJsonValue(part.input);
+        messages.push({
+          kind: "assistant-tool-call",
+          callId: part.toolCallId,
+          name: part.toolName,
+          input: cloneJson(part.input),
+        });
+      }
+      continue;
     }
+    if (value.role === "tool" && Array.isArray(value.content)) {
+      for (const part of value.content) {
+        if (!part || typeof part !== "object" || Array.isArray(part) ||
+            part.type !== "tool-result" ||
+            typeof part.toolCallId !== "string" || !part.toolCallId ||
+            typeof part.toolName !== "string" || !part.toolName ||
+            typeof part.output !== "string") {
+          throw new ValidationError(
+            "Provider-input tool-result content is invalid",
+          );
+        }
+        messages.push({
+          kind: "tool-result",
+          callId: part.toolCallId,
+          name: part.toolName,
+          content: part.output,
+          ...(normalizeCacheBreakpoint(value.cacheBreakpoint)
+            ? { cacheBreakpoint: true }
+            : {}),
+        });
+      }
+      continue;
+    }
+    if (value.kind === "assistant-tool-call") {
+      if (typeof value.callId !== "string" || !value.callId ||
+          typeof value.name !== "string" || !value.name ||
+          !Object.hasOwn(value, "input")) {
+        throw new ValidationError("Provider-input assistant tool call is invalid");
+      }
+      assertJsonValue(value.input);
+      messages.push({
+        kind: "assistant-tool-call",
+        callId: value.callId,
+        name: value.name,
+        input: cloneJson(value.input),
+      });
+      continue;
+    }
+    if (value.kind === "tool-result") {
+      if (typeof value.callId !== "string" || !value.callId ||
+          typeof value.name !== "string" || !value.name ||
+          typeof value.content !== "string" ||
+          normalizeCacheBreakpoint(value.cacheBreakpoint) === null) {
+        throw new ValidationError("Provider-input tool result is invalid");
+      }
+      messages.push({
+        kind: "tool-result",
+        callId: value.callId,
+        name: value.name,
+        content: value.content,
+        ...(normalizeCacheBreakpoint(value.cacheBreakpoint)
+          ? { cacheBreakpoint: true }
+          : {}),
+      });
+      continue;
+    }
+    if (typeof value.content !== "string") {
+      if (value.kind !== undefined) {
+        throw new ValidationError("Provider-input message kind is invalid");
+      }
+      continue;
+    }
+    const normalizedBreakpoint = normalizeCacheBreakpoint(
+      value.cacheBreakpoint,
+    );
+    const cacheBreakpoint = normalizedBreakpoint === true
+      ? { cacheBreakpoint: true as const }
+      : {};
+    if (normalizedBreakpoint === null) {
+      throw new ValidationError("Provider-input cache breakpoint is invalid");
+    }
+    if (value.kind === "text" || value.kind === undefined) {
+      if (value.role === "system") {
+        messages.push({
+          kind: "text", role: "system", content: value.content,
+          ...cacheBreakpoint,
+        });
+      } else if (value.role === "assistant") {
+        messages.push({
+          kind: "text", role: "assistant", content: value.content,
+          ...cacheBreakpoint,
+        });
+      } else if (value.role === "tool") {
+        messages.push({
+          kind: "text",
+          role: "user",
+          content: `[tool observation]\n${value.content}`,
+          ...cacheBreakpoint,
+        });
+      } else {
+        messages.push({
+          kind: "text", role: "user", content: value.content,
+          ...cacheBreakpoint,
+        });
+      }
+      continue;
+    }
+    throw new ValidationError("Provider-input message kind is invalid");
   }
   if (!messages.length) {
-    messages.push({ role: "user", content: JSON.stringify(context) });
+    messages.push({
+      kind: "text",
+      role: "user",
+      content: JSON.stringify(context),
+    });
   }
   return Object.freeze(messages.map((message) => Object.freeze(message)));
+}
+
+function normalizeCacheBreakpoint(value: JsonValue | undefined):
+  | boolean
+  | null {
+  if (value === undefined) return false;
+  if (value === true) return true;
+  if (value && typeof value === "object" && !Array.isArray(value) &&
+      Object.keys(value).length === 1 &&
+      value.mode === "explicit") {
+    return true;
+  }
+  return null;
 }
 
 function validateCapacity(
@@ -391,17 +554,7 @@ function validateCandidateShape(candidate: ProviderInputCandidate): void {
   if (!Array.isArray(candidate.messages) || !Array.isArray(candidate.tools)) {
     throw new ValidationError("Provider-input messages and tools must be arrays");
   }
-  for (const message of candidate.messages) {
-    assertExactKeys(
-      message as unknown as Record<string, unknown>,
-      ["role", "content"],
-      "Provider-input message",
-    );
-    if (!["system", "user", "assistant"].includes(message.role) ||
-        typeof message.content !== "string") {
-      throw new ValidationError("Provider-input message is invalid");
-    }
-  }
+  validateProviderInputMessages(candidate.messages);
   const toolNames = new Set<string>();
   for (const tool of candidate.tools) {
     assertExactKeys(
@@ -496,6 +649,19 @@ function validateCandidateShape(candidate: ProviderInputCandidate): void {
           !isDigest(responseContract.contractDigest))) {
     throw new ValidationError("Provider-input provenance is invalid");
   }
+  validateProviderInputCache(
+    candidate.cache,
+    candidate.provenance.provider,
+    candidate.messages,
+  );
+  if (candidate.cache.mode === "disabled" &&
+      candidate.messages.some((message) =>
+        "cacheBreakpoint" in message &&
+        message.cacheBreakpoint === true)) {
+    throw new ValidationError(
+      "Disabled provider-input caching cannot retain cache breakpoints",
+    );
+  }
   validateCapacity(
     candidate.provenance.capacity,
     {
@@ -506,6 +672,130 @@ function validateCandidateShape(candidate: ProviderInputCandidate): void {
       },
     } as ModelDispatch,
   );
+}
+
+function deriveProviderInputCache(
+  context: JsonValue,
+  dispatch: ModelDispatch,
+): ProviderInputCacheContract {
+  if (dispatch.configuration.provider !== "openai" ||
+      !context || typeof context !== "object" || Array.isArray(context) ||
+      !normalizeProviderMessages(context).some((message) =>
+        "cacheBreakpoint" in message && message.cacheBreakpoint === true
+      ) ||
+      !context.session || typeof context.session !== "object" ||
+      Array.isArray(context.session) ||
+      typeof context.session.id !== "string" || !context.session.id ||
+      typeof context.session.branchId !== "string" ||
+      !context.session.branchId) {
+    return Object.freeze({ mode: "disabled" });
+  }
+  const digest = canonicalJsonDigest({
+    kind: "agencity.openai-prompt-cache-key.v1",
+    sessionId: context.session.id,
+    branchId: context.session.branchId,
+  });
+  return Object.freeze({
+    mode: "openai-explicit",
+    promptCacheKey: digest.slice("sha256:".length),
+    ttl: PROVIDER_INPUT_OPENAI_CACHE_TTL,
+  });
+}
+
+function validateProviderInputMessages(
+  messages: readonly ProviderInputMessage[],
+): void {
+  const calls = new Map<string, string>();
+  const results = new Set<string>();
+  for (const message of messages) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      throw new ValidationError("Provider-input message is invalid");
+    }
+    if (message.kind === "text") {
+      assertAllowedKeys(
+        message as unknown as Record<string, unknown>,
+        ["kind", "role", "content"],
+        ["cacheBreakpoint"],
+        "Provider-input text message",
+      );
+      if (!["system", "user", "assistant"].includes(message.role) ||
+          typeof message.content !== "string" ||
+          (message.cacheBreakpoint !== undefined &&
+            message.cacheBreakpoint !== true)) {
+        throw new ValidationError("Provider-input text message is invalid");
+      }
+      continue;
+    }
+    if (message.kind === "assistant-tool-call") {
+      assertExactKeys(
+        message as unknown as Record<string, unknown>,
+        ["kind", "callId", "name", "input"],
+        "Provider-input assistant tool call",
+      );
+      if (typeof message.callId !== "string" || !message.callId ||
+          typeof message.name !== "string" || !message.name ||
+          calls.has(message.callId)) {
+        throw new ValidationError(
+          "Provider-input assistant tool call is invalid",
+        );
+      }
+      assertJsonValue(message.input);
+      calls.set(message.callId, message.name);
+      continue;
+    }
+    if (message.kind === "tool-result") {
+      assertAllowedKeys(
+        message as unknown as Record<string, unknown>,
+        ["kind", "callId", "name", "content"],
+        ["cacheBreakpoint"],
+        "Provider-input tool result",
+      );
+      if (typeof message.callId !== "string" || !message.callId ||
+          typeof message.name !== "string" || !message.name ||
+          typeof message.content !== "string" ||
+          calls.get(message.callId) !== message.name ||
+          results.has(message.callId) ||
+          (message.cacheBreakpoint !== undefined &&
+            message.cacheBreakpoint !== true)) {
+        throw new ValidationError("Provider-input tool result is invalid");
+      }
+      results.add(message.callId);
+      continue;
+    }
+    throw new ValidationError("Provider-input message kind is invalid");
+  }
+}
+
+function validateProviderInputCache(
+  cache: ProviderInputCacheContract,
+  provider: string,
+  messages: readonly ProviderInputMessage[],
+): void {
+  if (!cache || typeof cache !== "object" || Array.isArray(cache)) {
+    throw new ValidationError("Provider-input cache contract is invalid");
+  }
+  if (cache.mode === "disabled") {
+    assertExactKeys(
+      cache as unknown as Record<string, unknown>,
+      ["mode"],
+      "Provider-input cache contract",
+    );
+    return;
+  }
+  assertExactKeys(
+    cache as unknown as Record<string, unknown>,
+    ["mode", "promptCacheKey", "ttl"],
+    "Provider-input cache contract",
+  );
+  if (cache.mode !== "openai-explicit" || provider !== "openai" ||
+      typeof cache.promptCacheKey !== "string" ||
+      !/^[a-f0-9]{64}$/.test(cache.promptCacheKey) ||
+      cache.ttl !== PROVIDER_INPUT_OPENAI_CACHE_TTL ||
+      !messages.some((message) =>
+        "cacheBreakpoint" in message && message.cacheBreakpoint === true
+      )) {
+    throw new ValidationError("Provider-input cache contract is invalid");
+  }
 }
 
 function assertExactKeys(

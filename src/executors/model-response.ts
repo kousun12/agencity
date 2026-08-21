@@ -1156,10 +1156,19 @@ function normalizeUsage(value: unknown): Usage {
   const record = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+  const details = record.inputTokenDetails &&
+      typeof record.inputTokenDetails === "object" &&
+      !Array.isArray(record.inputTokenDetails)
+    ? record.inputTokenDetails as Record<string, unknown>
+    : {};
+  const cacheReadTokens = optionalFiniteCount(details.cacheReadTokens);
+  const cacheWriteTokens = optionalFiniteCount(details.cacheWriteTokens);
   return {
     inputTokens: finiteCount(record.inputTokens),
     outputTokens: finiteCount(record.outputTokens),
     costUsd: 0,
+    ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
+    ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
   };
 }
 
@@ -1363,6 +1372,12 @@ function finiteCount(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : 0;
+}
+
+function optionalFiniteCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
 }
 
 function boundedScrubbedText(value: string, maximum: number): string {

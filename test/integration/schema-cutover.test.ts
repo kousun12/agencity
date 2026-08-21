@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 describe("current event schema cutover", () => {
-  test.each([1, 2, 3, 4])("rejects version-%d workspace events before applying migrations or deleting data", async (schemaVersion) => {
+  test.each([1, 2, 3, 4, 5])("rejects version-%d workspace events before applying migrations or deleting data", async (schemaVersion) => {
     directory = await mkdtemp(join(tmpdir(), "ag-schema-cutover-"));
     const url = `file:${directory}/agent.db`;
     const raw = createClient({ url });
@@ -42,7 +42,7 @@ describe("current event schema cutover", () => {
     retained.close();
   });
 
-  test.each([1, 2, 3, 4])("rejects version-%d events before payload projection", (schemaVersion) => {
+  test.each([1, 2, 3, 4, 5])("rejects version-%d events before payload projection", (schemaVersion) => {
     const event = {
       cursor: "1",
       id: `legacy-${schemaVersion}`,
