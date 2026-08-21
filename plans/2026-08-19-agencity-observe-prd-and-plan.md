@@ -1,6 +1,6 @@
 # Agencity Observe PRD and implementation plan
 
-**Status:** Proposed  
+**Status:** In progress
 **Date:** August 19, 2026  
 **Corrected and rescoped:** August 20, 2026
 **Parent architecture:** [Prime Agent TypeScript/Turso rewrite](./2026-08-05-prime-agent-typescript-turso-rewrite-prd.md)  
@@ -659,3 +659,11 @@ A later control phase must add:
 - tests proving that observation credentials and routes cannot invoke controls.
 
 The first version does not render disabled controls that imply unavailable authority.
+
+## Implementation log
+
+### 2026-08-21 — Read-only discovery and stream liveness
+- Completed: Added non-creating, owner-validated service-manifest reads; bounded passive polling for the exact workspace marker and service manifest; periodic branch-stream comment heartbeats with cleanup; and optional client comment delivery for liveness detection.
+- Validation: `bun test --timeout 30000 test/unit/service-discovery.test.ts test/integration/fu005-fu006-protocol.test.ts test/integration/managed-service.test.ts` passed with 52 tests and 0 failures.
+- Plan notes: The heartbeat guarantee advances the managed-service protocol from revision 3 to revision 4. Ordinary revision-4 product clients retain compatibility with revision-2 and revision-3 services, while Observe requires revision 4.
+- Remaining: Authenticated health and capability classification, observer source/projection, web server and UI, complete acceptance coverage, documentation, and aggregate verification.

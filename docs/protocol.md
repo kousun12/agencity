@@ -368,6 +368,7 @@ sequenceDiagram
     Client->>Protocol: Open SSE with after=C
     Protocol-->>Client: Comment prelude without event data or cursor
     Client->>Client: Mark stream connected
+    Protocol-->>Client: Periodic heartbeat comment without data or cursor
     Protocol->>Storage: Read committed events after C
     Storage-->>Protocol: Event at cursor C+1
     Protocol-->>Client: Committed event with id C+1
@@ -410,11 +411,11 @@ data: <EffectProgressNotification JSON>
 
 Progress has no cursor, is not replayed, and may be bounded or dropped. Structured model progress exposes only a bounded phase, a sealed tool name, or a byte count. Provider/model/call identities and provisional arguments remain private and non-executable. Text operations may still stream bounded provisional text. Only a validated terminal text result or accepted `finish` message can enter assistant conversation.
 
-The endpoint begins with the SSE comment `: connected` so a quiet branch opens immediately. The comment has no event name, data, cursor, or durable meaning, and clients ignore it after recognizing that the HTTP stream is connected. The loopback HTTP server disables Bun's request idle timeout for this route only, so a quiet attached client remains connected without periodic heartbeat frames.
+The endpoint begins with the SSE comment `: connected` so a quiet branch opens immediately and emits `: heartbeat` comments at least every 15 seconds while it remains attached. These comments have no event name, data, cursor, or durable meaning, and clients ignore them. The loopback HTTP server also disables Bun's request idle timeout for this route only.
 
-The endpoint does not emit the initial snapshot, periodic heartbeat frames, or an explicit end marker. Publication happens after commit, and catch-up reads storage rather than trusting an in-memory notification, so delivery should be treated as at least once.
+The endpoint does not emit the initial snapshot, heartbeat protocol events, or an explicit end marker. Publication happens after commit, and catch-up reads storage rather than trusting an in-memory notification, so delivery should be treated as at least once.
 
-`watchBranch` implements this algorithm. It serializes event callbacks, advances its cursor only after a callback succeeds, reconnects from that cursor, and reports when temporary progress must be discarded. `runAgent`, `generateText`, and `generateObject` use this shared watch path for terminal waiting and always perform one final retained result read on terminal detection or timeout; they do not maintain independent short-interval polling loops. When a revision-3 TUI observes a still-running revision-2 managed service, it follows incompatible schema-5 events by refreshing the service's cursor-pinned snapshot instead of applying those events with the schema-6 client reducer.
+`watchBranch` implements this algorithm. It serializes event callbacks, advances its cursor only after a callback succeeds, reconnects from that cursor, and reports when temporary progress must be discarded. `AgentClient.stream` can also report comment receipt to liveness-aware clients without treating comments as events. `runAgent`, `generateText`, and `generateObject` use the shared watch path for terminal waiting and always perform one final retained result read on terminal detection or timeout; they do not maintain independent short-interval polling loops. When a revision-4 TUI observes a still-running revision-2 managed service, it follows incompatible schema-5 events by refreshing the service's cursor-pinned snapshot instead of applying those events with the schema-6 client reducer.
 
 ## Exported protocol types
 
@@ -424,7 +425,7 @@ The exported `ProtocolRequest` and `ProtocolResponse` unions in `protocol/types.
 
 ## Security and compatibility limits
 
-- Managed service protocol revision 3 is the current trusted-local pre-release contract. Revision-3 clients may attach read/write product flows to a still-running revision-2 service so admitted work can finish; snapshot refresh supplies TUI compatibility across the schema-5/schema-6 reducer boundary. Revision-2 clients cannot attach to a revision-3 service, and other incompatible ranges fail discovery with `PROTOCOL_MISMATCH`. No removed recursive-model or `/models` route is emulated.
+- Managed service protocol revision 4 is the current trusted-local pre-release contract and adds periodic branch-stream comment heartbeats. Revision-4 product clients may attach read/write product flows to still-running revision-2 or revision-3 services so admitted work can finish; snapshot refresh supplies TUI compatibility across the schema-5/schema-6 reducer boundary. Observe requires revision 4. Revision-2 and revision-3 clients cannot attach to revision-4 services, and other incompatible ranges fail discovery with `PROTOCOL_MISMATCH`. No removed recursive-model or `/models` route is emulated.
 - Additive capabilities are negotiated through `/capabilities`; effort-aware clients must not send an effort field when `reasoningEffortSelection` is absent.
 - Managed authentication is owner-local bearer access, not multi-tenant authorization.
 - The embedded diagnostic server is unauthenticated.

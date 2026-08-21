@@ -76,6 +76,8 @@ export interface AgentStreamHandlers {
   readonly onEvent: (event: AgentEvent) => unknown | Promise<unknown>;
   readonly onProgress?: (progress: EffectProgressNotification) => unknown | Promise<unknown>;
   readonly onOpen?: () => unknown | Promise<unknown>;
+  /** SSE comments carry connection liveness only; they never advance a cursor. */
+  readonly onComment?: (comment: string) => unknown | Promise<unknown>;
 }
 
 export class AgentClient {
@@ -245,7 +247,7 @@ export class AgentClient {
         if (BigInt(event.cursor) <= BigInt(cursor)) return;
         await handlers.onEvent(event);
         cursor = event.cursor;
-      }, signal);
+      }, signal, handlers.onComment);
     } catch (error) {
       if (!signal?.aborted) throw error;
     } finally {
@@ -619,6 +621,7 @@ async function readProtocolStream(
   body: ReadableStream<Uint8Array>,
   onItem: (eventName: string, data: string) => void | Promise<void>,
   signal?: AbortSignal,
+  onComment?: (comment: string) => void | Promise<void>,
 ): Promise<void> {
   const reader = body.getReader();
   const abort = (): void => { void reader.cancel(signal?.reason).catch(() => {}); };
@@ -650,6 +653,7 @@ async function readProtocolStream(
         let line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
         if (line.endsWith("\r")) line = line.slice(0, -1);
         if (line === "") await dispatch();
+        else if (line.startsWith(":")) await onComment?.(line.slice(1).replace(/^ /, ""));
         else if (line.startsWith("event:")) eventName = line.slice(6).replace(/^ /, "");
         else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
       }

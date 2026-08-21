@@ -478,12 +478,35 @@ export async function readServiceManifest(input: {
 }): Promise<ServiceManifestV1 | null> {
   const paths = serviceStatePaths(input.workspaceRoot);
   await ensureSecureServiceDirectory(paths.workspaceRoot);
+  return readServiceManifestFile(paths.manifestPath, input.workspaceId);
+}
+
+/**
+ * Strictly read-only manifest discovery. Missing state returns null without
+ * creating `.agencity`, `service`, or a manifest. Existing directories and the
+ * manifest retain owner-only, real-path, no-follow, and identity validation.
+ */
+export async function readServiceManifestReadOnly(input: {
+  readonly workspaceRoot: string;
+  readonly workspaceId: string;
+}): Promise<ServiceManifestV1 | null> {
+  const paths = serviceStatePaths(input.workspaceRoot);
+  await assertWorkspaceRoot(paths.workspaceRoot);
+  if (!await inspectOwnerOnlyDirectory(paths.metadataDirectory, "Workspace metadata directory")) return null;
+  if (!await inspectOwnerOnlyDirectory(paths.serviceDirectory, "Service state directory")) return null;
+  return readServiceManifestFile(paths.manifestPath, input.workspaceId);
+}
+
+async function readServiceManifestFile(
+  manifestPath: string,
+  workspaceId: string,
+): Promise<ServiceManifestV1 | null> {
   let handle: FileHandle;
   let before: Stats;
   try {
-    before = await lstat(paths.manifestPath);
+    before = await lstat(manifestPath);
     if (before.isSymbolicLink()) throw insecure("Service manifest must not be a symbolic link");
-    handle = await open(paths.manifestPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(manifestPath, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
     if (isErrno(error, "ENOENT")) return null;
     if (error instanceof ServiceDiscoveryError) throw error;
@@ -520,7 +543,7 @@ export async function readServiceManifest(input: {
       throw invalidManifest("Service manifest is not valid JSON");
     }
     const manifest = validateServiceManifest(parsed);
-    if (manifest.workspaceId !== input.workspaceId) {
+    if (manifest.workspaceId !== workspaceId) {
       throw new ServiceDiscoveryError("WORKSPACE_MISMATCH", "Service manifest belongs to a different workspace");
     }
     return manifest;
@@ -785,6 +808,28 @@ async function ensureOwnerOnlyDirectory(path: string, parent: string): Promise<v
     assertSameFile(before, after, "Service state directory changed while it was opened");
     assertOwnerAndMode(after, DIRECTORY_MODE, "Service state directory");
     if (created) await syncCheckedDirectory(parent);
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+async function inspectOwnerOnlyDirectory(path: string, label: string): Promise<boolean> {
+  let before: Stats;
+  let handle: FileHandle;
+  try {
+    before = await lstat(path);
+    if (!before.isDirectory() || before.isSymbolicLink()) throw insecure(`${label} must be a real directory`);
+    handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return false;
+    if (error instanceof ServiceDiscoveryError) throw error;
+    throw insecure(`${label} could not be opened securely`);
+  }
+  try {
+    const after = await handle.stat();
+    assertSameFile(before, after, `${label} changed while it was opened`);
+    assertOwnerAndMode(after, DIRECTORY_MODE, label);
+    return true;
   } finally {
     await handle.close().catch(() => {});
   }

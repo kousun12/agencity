@@ -15,12 +15,17 @@ import {
   hashServiceConfiguration,
   publishServiceManifest,
   readServiceManifest,
+  readServiceManifestReadOnly,
   serviceManifestSummary,
   serviceStatePaths,
   validateServiceManifest,
   type ServiceAuthorityDecision,
   type ServiceManifestV1,
 } from "../../src/product/service-discovery.ts";
+import {
+  passiveDiscoveryPaths,
+  startPassivePathPolling,
+} from "../../src/product/passive-path-poll.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -219,6 +224,104 @@ describe("owner-only service discovery state", () => {
   });
 });
 
+describe("read-only observer discovery", () => {
+  test("never creates missing metadata and reads an existing secure manifest", async () => {
+    const root = await tempRoot("agencity-service-read-only-");
+    const candidate = manifest();
+    expect(await readServiceManifestReadOnly({
+      workspaceRoot: root,
+      workspaceId: candidate.workspaceId,
+    })).toBeNull();
+    expect(await readdir(root)).toEqual([]);
+
+    await mkdir(join(root, ".agencity"), { mode: 0o700 });
+    await chmod(join(root, ".agencity"), 0o700);
+    expect(await readServiceManifestReadOnly({
+      workspaceRoot: root,
+      workspaceId: candidate.workspaceId,
+    })).toBeNull();
+    expect(await readdir(join(root, ".agencity"))).toEqual([]);
+
+    await publishServiceManifest({
+      workspaceRoot: root,
+      workspaceId: candidate.workspaceId,
+      manifest: candidate,
+    });
+    expect(await readServiceManifestReadOnly({
+      workspaceRoot: root,
+      workspaceId: candidate.workspaceId,
+    })).toEqual(candidate);
+  });
+
+  test("rejects insecure directories, manifest links, modes, and oversized bytes", async () => {
+    const linkedRoot = await tempRoot("agencity-service-read-only-link-");
+    const external = await tempRoot("agencity-service-read-only-target-");
+    await symlink(external, join(linkedRoot, ".agencity"));
+    await expect(readServiceManifestReadOnly({
+      workspaceRoot: linkedRoot,
+      workspaceId: manifest().workspaceId,
+    })).rejects.toMatchObject({ code: "INSECURE_SERVICE_STATE" });
+
+    const directoryRoot = await tempRoot("agencity-service-read-only-mode-");
+    await mkdir(join(directoryRoot, ".agencity", "service"), { recursive: true, mode: 0o700 });
+    await chmod(join(directoryRoot, ".agencity"), 0o700);
+    await chmod(join(directoryRoot, ".agencity", "service"), 0o755);
+    await expect(readServiceManifestReadOnly({
+      workspaceRoot: directoryRoot,
+      workspaceId: manifest().workspaceId,
+    })).rejects.toMatchObject({ code: "INSECURE_SERVICE_STATE" });
+
+    const manifestRoot = await tempRoot("agencity-service-read-only-manifest-");
+    const service = await ensureSecureServiceDirectory(manifestRoot);
+    const outside = join(await tempRoot("agencity-service-read-only-outside-"), "manifest.json");
+    await writeFile(outside, `${JSON.stringify(manifest())}\n`, { mode: 0o600 });
+    await symlink(outside, join(service, "manifest.json"));
+    await expect(readServiceManifestReadOnly({
+      workspaceRoot: manifestRoot,
+      workspaceId: manifest().workspaceId,
+    })).rejects.toMatchObject({ code: "INSECURE_SERVICE_STATE" });
+
+    const oversizedRoot = await tempRoot("agencity-service-read-only-large-");
+    await writeRawManifest(oversizedRoot, "x".repeat(MAX_SERVICE_MANIFEST_BYTES + 1));
+    await expect(readServiceManifestReadOnly({
+      workspaceRoot: oversizedRoot,
+      workspaceId: manifest().workspaceId,
+    })).rejects.toMatchObject({ code: "MANIFEST_TOO_LARGE" });
+  });
+
+  test("passively detects exact marker and manifest changes and stops cleanly", async () => {
+    const root = await tempRoot("agencity-passive-poll-");
+    const paths = passiveDiscoveryPaths(root);
+    const changed: string[] = [];
+    const poller = await startPassivePathPolling({
+      paths,
+      intervalMs: 10,
+      onChange: changes => { changed.push(...changes.map(change => change.path)); },
+    });
+
+    await mkdir(join(root, ".agencity"), { mode: 0o700 });
+    await chmod(join(root, ".agencity"), 0o700);
+    await writeFile(paths[0], "workspace-aaaaaaaaaaaaaaaa\n", { mode: 0o600 });
+    await waitForCondition(() => changed.includes(paths[0]), "workspace marker change");
+
+    const candidate = manifest();
+    await publishServiceManifest({
+      workspaceRoot: root,
+      workspaceId: candidate.workspaceId,
+      manifest: candidate,
+    });
+    await waitForCondition(() => changed.includes(paths[1]), "service manifest change");
+
+    poller.stop();
+    await poller.done;
+    const countAfterStop = changed.length;
+    await writeFile(paths[0], "workspace-bbbbbbbbbbbbbbbb\n", { mode: 0o600 });
+    await Bun.sleep(30);
+    expect(changed).toHaveLength(countAfterStop);
+    expect(new Set(changed)).toEqual(new Set(paths));
+  });
+});
+
 describe("publication winner and compatibility semantics", () => {
   test("selects exactly one winner under concurrent publication", async () => {
     const root = await tempRoot();
@@ -407,3 +510,11 @@ describe("detached service child spawn plan", () => {
     })).toThrow(ServiceDiscoveryError);
   });
 });
+
+async function waitForCondition(predicate: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${label}`);
+    await Bun.sleep(5);
+  }
+}
