@@ -141,11 +141,19 @@ test("Chromium observes a live family through the foreground CLI", async () => {
     await page.getByRole("button", { name: "Inspect Root Alpha" }).waitFor();
     expect(await page.locator("#current-work-title").textContent()).toBe("Root Alpha");
     expect(await page.locator(".connection-details").evaluate(element => element.hasAttribute("open"))).toBe(false);
-    expect(await page.locator(".surface-note").textContent()).toBe("Local observer · Read-only view");
+    expect(await page.locator(".surface-note").textContent()).toContain("Trusted local · Read-only · Sensitive data");
+    expect(await page.locator(".surface-note").textContent()).toContain("Attached viewing can keep the managed service active");
     expect(await page.locator(".route-node").count()).toBe(1);
     expect(await page.locator("#family-graph").evaluate(element =>
       element.scrollWidth <= element.clientWidth + 1
     )).toBe(true);
+    expect(await page.locator(".graph-panel").evaluate(panel => {
+      const graph = panel.querySelector("#family-graph");
+      if (!(graph instanceof HTMLElement)) return false;
+      const panelBounds = panel.getBoundingClientRect();
+      const graphBounds = graph.getBoundingClientRect();
+      return graphBounds.height >= 288 && panelBounds.bottom - graphBounds.bottom <= 18;
+    })).toBe(true);
     await waitFor(
       () => fixtureOne.activeStreams === 1,
       "Observer did not attach the root branch stream",

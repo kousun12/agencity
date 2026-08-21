@@ -94,16 +94,17 @@ describe("observer browser assets", () => {
     expect(javascript).toContain("DETAIL_SECTIONS.some");
   });
 
-  test("keeps local read-only authority visible without a callout", async () => {
+  test("keeps authority, sensitivity, and quiescence guidance visible without a callout", async () => {
     const html = await readAsset("index.html");
-    expect(html).toContain("Local observer · Read-only view");
+    expect(html).toContain("Trusted local · Read-only · Sensitive data");
+    expect(html).toContain("Attached viewing can keep the managed service active");
     expect(html).not.toContain('class="trust-notice"');
-    expect(html).not.toContain("Sensitive agent and repository data may appear here.");
   });
 
   test("prioritizes current work and keeps route detail in context", async () => {
     const html = await readAsset("index.html");
     const javascript = await readAsset("app.js");
+    const css = await readAsset("app.css");
 
     expect(html).toContain('id="current-work-title"');
     expect(html).toContain('class="connection-details"');
@@ -113,5 +114,7 @@ describe("observer browser assets", () => {
     expect(javascript).toContain("Model response requested");
     expect(javascript).toContain("TypeScript action completed");
     expect(javascript).toContain("state.inspectorOpen = true");
+    expect(javascript).toContain("new ResizeObserver(scheduleGraphLayout)");
+    expect(css).toContain("flex: 1 1 18rem");
   });
 });

@@ -371,6 +371,11 @@ main {
   background: rgba(17, 23, 34, 0.92);
 }
 
+.graph-panel {
+  display: flex;
+  flex-direction: column;
+}
+
 .section-heading {
   display: flex;
   gap: 1rem;
@@ -398,7 +403,8 @@ main {
 
 .family-graph {
   position: relative;
-  height: clamp(18rem, 48vh, 34rem);
+  flex: 1 1 18rem;
+  min-height: 18rem;
   overflow: auto;
   border: 1px solid #212a38;
   border-radius: 0.6rem;

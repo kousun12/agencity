@@ -466,6 +466,40 @@ describe("observer projections", () => {
       wallTimeMs: 4_000,
       exceeded: false,
     });
+
+    const terminal = state("root", "main", {
+      agentRuns: {
+        run: {
+          ...run("succeeded"),
+          steps: [{
+            id: "step",
+            ordinal: 1,
+            contextId: "context",
+            callId: "call",
+            effectId: "effect",
+            actionId: "action",
+            observationEventIds: [],
+            modelAttempts: [],
+            action: {
+              protocol: "agencity.agent-action",
+              version: 1,
+              type: "final",
+              content: "done",
+            },
+            eventId: "step-event",
+          }],
+        },
+      },
+      appliedEventIds: ["created-root", "run-event"],
+    });
+    const terminalOverview = deriveObserverFamilyOverview({
+      root,
+      routes: new Map([[observerRouteKey(root), routeSnapshot(root, terminal)]]),
+      edges: [],
+      truncated: false,
+      edgesTruncated: false,
+    });
+    expect(terminalOverview.nodes[0]?.latestRun?.currentAction).toBeNull();
   });
 
   test("distinguishes working, idle, attention, ended, and unavailable activity", () => {

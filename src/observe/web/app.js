@@ -80,6 +80,7 @@
     reconnectAttempts: 0,
     refreshTimer: 0,
     layoutTimer: 0,
+    graphObserver: null,
     resyncing: false,
   };
 
@@ -1360,6 +1361,11 @@
     return "Observer request failed.";
   }
 
+  function scheduleGraphLayout() {
+    window.clearTimeout(state.layoutTimer);
+    state.layoutTimer = window.setTimeout(renderGraph, 100);
+  }
+
   function bindActions() {
     for (const button of document.querySelectorAll("[data-depth]")) {
       button.addEventListener("click", () => {
@@ -1383,11 +1389,15 @@
     window.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && state.inspectorOpen) closeInspector();
     });
-    window.addEventListener("resize", () => {
-      window.clearTimeout(state.layoutTimer);
-      state.layoutTimer = window.setTimeout(renderGraph, 100);
+    window.addEventListener("resize", scheduleGraphLayout);
+    if ("ResizeObserver" in window) {
+      state.graphObserver = new ResizeObserver(scheduleGraphLayout);
+      state.graphObserver.observe(view["family-graph"]);
+    }
+    window.addEventListener("beforeunload", () => {
+      state.graphObserver?.disconnect();
+      closeStream();
     });
-    window.addEventListener("beforeunload", closeStream);
   }
 
   async function start() {
