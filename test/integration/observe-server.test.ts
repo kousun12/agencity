@@ -232,6 +232,48 @@ describe("observer authenticated server", () => {
     expect(counters.closes).toBeGreaterThanOrEqual(counters.connects);
   });
 
+  test("returns a typed route-unavailable response when a detail snapshot cannot load", async () => {
+    const root = await workspace(true);
+    const route = { sessionId: "root", branchId: "main" };
+    const source: ObserverSource = {
+      workspaceId: "workspace-observe-test-0001",
+      instanceId: "instance-observe-test",
+      applicationVersion: "test",
+      async roots() {
+        return [{ route, name: "Root", status: "idle", worker: "idle", unresolvedWork: 0 }];
+      },
+      async loadRouteSnapshot() {
+        throw new Error("snapshot unavailable");
+      },
+      async streamRoute() {},
+      close() {},
+    };
+    const controller = new ObserverController({
+      workspaceRoot: root,
+      sourceFactory: { async connect() { return { kind: "connected", source }; } },
+    });
+    await controller.start();
+    const server = await startObserverServer({ controller, port: 0 });
+    const origin = `http://127.0.0.1:${server.port}`;
+    try {
+      const cookie = await establish(server);
+      const detail = await fetch(
+        `${origin}/api/family/detail?sessionId=root&branchId=main&section=runs`,
+        { headers: { "Sec-Fetch-Site": "same-origin", Cookie: cookie } },
+      );
+      expect(detail.status).toBe(404);
+      expect(await detail.json()).toMatchObject({
+        ok: false,
+        error: {
+          code: "ROUTE_UNAVAILABLE",
+          message: "Observer route snapshot is unavailable",
+        },
+      });
+    } finally {
+      await server.stop();
+    }
+  });
+
   test("rejects hostile Host and cross-origin state changes", async () => {
     const root = await workspace(false);
     const controller = new ObserverController({
