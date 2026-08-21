@@ -525,6 +525,35 @@ describe("FU-012 retained family messaging", () => {
     } finally { await value.supervisor.close(); }
   });
 
+  test("runMany and spawnMany reject wrapper objects with exact array guidance", async () => {
+    const value = await fixture();
+    try {
+      const cell = await value.supervisor.executeCell(
+        value.root.sessionId,
+        value.root.branchId,
+        `const messages = [];
+        for (const method of ["runMany", "spawnMany"]) {
+          try {
+            await sdk.agents[method]({ tasks: [] });
+          } catch (error) {
+            messages.push(error.message);
+          }
+        }
+        return messages;`,
+      );
+      expect(cell.result).toEqual([
+        "sdk.agents.runMany expects an input array directly; do not pass { tasks: [...] }",
+        "sdk.agents.spawnMany expects an input array directly; do not pass { tasks: [...] }",
+      ]);
+      expect(await value.supervisor.agents.listTasks(
+        value.root.sessionId,
+        value.root.branchId,
+      )).toHaveLength(0);
+    } finally {
+      await value.supervisor.close();
+    }
+  });
+
   test("sdk.agents run, runMany, spawn, and result retain task result references and notices", async () => {
     const value = await fixture([
       action({ type: "final", content: "single result" }),

@@ -13,7 +13,9 @@ describe("explicit AI and typed agent guidance", () => {
     expect(guidance).toContain("Every run, runMany, spawn, or spawnMany child input must include a concise stable human-readable name");
     expect(guidance).toContain("use that exact declared name");
     expect(guidance).toContain("Do not hand off your entire assigned task");
-    expect(guidance).toContain("sdk.agents.list() is an on-demand nuclear-family snapshot");
+    expect(guidance).toContain("It is an on-demand nuclear-family snapshot");
+    expect(guidance).toContain("sdk.agents.list() returns an object shaped exactly as { items: FamilyAgentRecord[] }, never a bare array");
+    expect(guidance).toContain("family.items.map(...)");
     expect(guidance).toContain("do not poll it on every step");
     expect(guidance).toContain("Use sdk.agents.spawn when a child should work independently");
     expect(guidance).toContain("handle.result(options)");
@@ -28,6 +30,9 @@ describe("explicit AI and typed agent guidance", () => {
     expect(guidance).toContain("Raw ai calls cannot inspect files, run commands, use skills, call tools");
     expect(guidance).toContain("Keep object schemas small and decision-oriented");
     expect(guidance).toContain("Use runMany or spawnMany only for bounded independent tasks");
+    expect(guidance).toContain("runMany and spawnMany each accept the input array directly");
+    expect(guidance).toContain("never an object such as { tasks: [...] }");
+    expect(guidance).toContain("returns its result array directly");
     expect(guidance).toContain("same canonical creator/model IDs");
     expect(guidance).toContain("not objective evidence, factual proof, completion proof, or expanded runtime authority");
     expect(guidance).toContain("A long parent-cell loop is not a durable coordinator across worker loss");

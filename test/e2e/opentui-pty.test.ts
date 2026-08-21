@@ -203,17 +203,26 @@ if grandchild_parent_ready:
     time.sleep(1)
     os.write(fd, b"\x1b[D")
 child_return = grandchild_parent_ready and pump(8, "Agencity — PTY reviewer", child_return_mark)
-child_parent_ready = child_return and pump(8, "← parent", child_return_mark)
+child_browser_restored = child_return and pump(8, "AGENT FAMILY", child_return_mark) and pump(2, "PTY grandchild", child_return_mark)
+child_parent_ready = child_browser_restored
+if child_browser_restored:
+    time.sleep(0.5)
+    os.write(fd, b"\x1b[D")
+    time.sleep(0.5)
 parent_mark = len(output)
+parent_open = False
 if child_parent_ready:
     time.sleep(1)
     os.write(fd, b"\x1b[D")
     parent_open = child_parent_ready and pump(8, "Agencity — OpenTUI pseudo-terminal round trip", parent_mark)
+parent_browser_restored = parent_open and pump(8, "AGENT FAMILY", parent_mark) and pump(2, "PTY reviewer", parent_mark)
 alternate_mark = len(output)
-if parent_open:
+if parent_browser_restored:
     time.sleep(0.3)
+    os.write(fd, b"\x1b[D")
+    time.sleep(0.2)
     os.write(fd, b"/new Alternate root\r")
-alternate_root = parent_open and pump(8, "Agencity — Alternate root", alternate_mark)
+alternate_root = parent_browser_restored and pump(8, "Agencity — Alternate root", alternate_mark)
 alternate_agents_ready = alternate_root
 agents_mark = len(output)
 if alternate_agents_ready:
@@ -288,8 +297,10 @@ print(json.dumps({
     "grandchildOpen": grandchild_open,
     "grandchildParentReady": grandchild_parent_ready,
     "childReturn": child_return,
+    "childBrowserRestored": child_browser_restored,
     "childParentReady": child_parent_ready,
     "parentOpen": parent_open,
+    "parentBrowserRestored": parent_browser_restored,
     "alternateRoot": alternate_root,
     "workspaceAgents": workspace_agents,
     "workspaceRoots": workspace_roots,
@@ -358,8 +369,10 @@ print(json.dumps({
       grandchildOpen: true,
       grandchildParentReady: true,
       childReturn: true,
+      childBrowserRestored: true,
       childParentReady: true,
       parentOpen: true,
+      parentBrowserRestored: true,
       alternateRoot: true,
       workspaceAgents: true,
       workspaceRoots: true,

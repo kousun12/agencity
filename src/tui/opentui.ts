@@ -661,6 +661,7 @@ export class OpenTuiApp {
   #learningExpanded = false;
   #familyFocus: "composer" | "summary" | "browser" = "composer";
   #familySelectedKey: string | null = null;
+  readonly #familyBrowserStateByRoute = new Map<string, { selectedKey: string; scrollTop: number }>();
 
   constructor(readonly renderer: CliRenderer, readonly controller: OpenTuiController) {
     this.#view = buildTerminalScreen(controller.presentation);
@@ -1366,6 +1367,12 @@ export class OpenTuiApp {
       && this.#composerValue().length === 0
       && !this.#familyNavigationBlockedByInspector()
     ) {
+      if (key.name === "right" && this.#view.familySummary) {
+        key.preventDefault();
+        key.stopPropagation();
+        this.#openFamilyBrowser();
+        return;
+      }
       if (key.name === "down" && this.#view.familySummary) {
         key.preventDefault();
         key.stopPropagation();
@@ -1658,7 +1665,7 @@ export class OpenTuiApp {
     this.#render();
   }
 
-  #openFamilyBrowser(): void {
+  #openFamilyBrowser(restoredScrollTop?: number): void {
     if (this.#view.historicalCursor !== null) {
       this.#showNotice("Return to live before opening another agent.", "warning");
       return;
@@ -1677,8 +1684,18 @@ export class OpenTuiApp {
     }
     this.controller.setFamilyBrowserOpen?.(true);
     this.#composer.blur();
-    this.#resetDetailScroll = true;
+    this.#resetDetailScroll = restoredScrollTop === undefined;
+    if (restoredScrollTop !== undefined && this.#detailScrollTimer) {
+      clearTimeout(this.#detailScrollTimer);
+      this.#detailScrollTimer = null;
+    }
     this.#render();
+    if (restoredScrollTop !== undefined) {
+      this.#details.stickyScroll = false;
+      this.#details.scrollTo({ x: 0, y: restoredScrollTop });
+      this.#details.scrollTop = restoredScrollTop;
+      this.renderer.requestRender();
+    }
   }
 
   #focusComposer(render = true): void {
@@ -1717,6 +1734,7 @@ export class OpenTuiApp {
       this.#showNotice("Family navigation is unavailable in this terminal.", "warning");
       return Promise.resolve();
     }
+    this.#rememberFamilyBrowserState();
     return this.#runFamilyTransition(() => this.controller.openFamilyChild!(child.sessionId, child.branchId));
   }
 
@@ -1735,7 +1753,26 @@ export class OpenTuiApp {
       this.#showNotice("Parent navigation is unavailable in this terminal.", "warning");
       return Promise.resolve();
     }
-    return this.#runFamilyTransition(() => this.controller.openFamilyParent!());
+    return this.#runFamilyTransition(() => this.controller.openFamilyParent!(), true);
+  }
+
+  #currentRouteKey(): string {
+    const state = this.controller.presentation.state;
+    return `${state.sessionId}\u0000${state.branch.id}`;
+  }
+
+  #rememberFamilyBrowserState(): void {
+    if (!this.#familySelectedKey) return;
+    const routeKey = this.#currentRouteKey();
+    this.#familyBrowserStateByRoute.delete(routeKey);
+    this.#familyBrowserStateByRoute.set(routeKey, {
+      selectedKey: this.#familySelectedKey,
+      scrollTop: Math.max(0, this.#details.scrollTop),
+    });
+    if (this.#familyBrowserStateByRoute.size > 64) {
+      const oldest = this.#familyBrowserStateByRoute.keys().next().value;
+      if (oldest !== undefined) this.#familyBrowserStateByRoute.delete(oldest);
+    }
   }
 
   #openWorkspaceAgents(): Promise<void> {
@@ -1848,29 +1885,39 @@ export class OpenTuiApp {
       this.controller.openWorkspaceAgent!(selected.sessionId, selected.branchId));
   }
 
-  #runFamilyTransition(navigate: () => Promise<void>): Promise<void> {
+  #runFamilyTransition(navigate: () => Promise<void>, restoreFamilyBrowser = false): Promise<void> {
     if (this.#busy) return Promise.resolve();
-    const operation = this.#performFamilyTransition(navigate);
+    const operation = this.#performFamilyTransition(navigate, restoreFamilyBrowser);
     this.#activeOperation = operation;
     return operation.finally(() => {
       if (this.#activeOperation === operation) this.#activeOperation = null;
     });
   }
 
-  async #performFamilyTransition(navigate: () => Promise<void>): Promise<void> {
+  async #performFamilyTransition(navigate: () => Promise<void>, restoreFamilyBrowser: boolean): Promise<void> {
     this.#busy = true;
     this.#render();
     try {
       await navigate();
-      this.#familySelectedKey = null;
-      this.#focusComposer(false);
+      const restoredState = restoreFamilyBrowser
+        ? this.#familyBrowserStateByRoute.get(this.#currentRouteKey()) ?? null
+        : null;
+      this.#familySelectedKey = restoredState?.selectedKey ?? null;
+      if (
+        restoredState
+        && this.#view.familyChildren.some(child => child.key === restoredState.selectedKey)
+      ) {
+        this.#openFamilyBrowser(restoredState.scrollTop);
+      } else {
+        this.#focusComposer(false);
+      }
     } catch (error) {
       this.showOutput(renderTerminalError(error, "command"));
     } finally {
       this.#busy = false;
       if (!this.#closed) {
         this.#render();
-        this.#composer.focus();
+        if (this.#familyFocus === "composer") this.#composer.focus();
       }
     }
   }
@@ -1967,7 +2014,7 @@ export class OpenTuiApp {
     return [
       this.#view.familyParent?.activity !== "unavailable" && this.#view.familyParent ? "← parent" : "",
       this.#view.familyRoot === true ? "← agents" : "",
-      this.#view.familySummary ? "↓ agents" : "",
+      this.#view.familySummary ? "↓/→ agents" : "",
     ].filter(Boolean).join(" · ");
   }
 

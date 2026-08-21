@@ -472,9 +472,9 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
   const agents = {
     spawn: async (input: unknown) =>
       attachAgentHandle(await call("agents.spawn", [normalizeAgentInput(input)])),
-    spawnMany: async (inputs: unknown[]) => {
+    spawnMany: async (inputs: unknown) => {
       const raw = await call("agents.spawnMany", [
-        inputs.map(normalizeAgentInput),
+        normalizeAgentInputs(inputs, "spawnMany"),
       ]);
       if (!Array.isArray(raw)) {
         throw new Error("Agent spawnMany returned invalid handles");
@@ -482,7 +482,9 @@ async function execute(message: Extract<Incoming, { type: "execute" }>): Promise
       return raw.map((handle) => attachAgentHandle(handle));
     },
     run: (input: unknown) => call("agents.run", [normalizeAgentInput(input)]),
-    runMany: (inputs: unknown[]) => call("agents.runMany", [inputs.map(normalizeAgentInput)]),
+    runMany: (inputs: unknown) => call("agents.runMany", [
+      normalizeAgentInputs(inputs, "runMany"),
+    ]),
     result: agentResult,
     get: (target?: string) => callWithOptional("agents.get", [], target),
     proposeProfileUpdate: (
@@ -671,6 +673,18 @@ function normalizeAgentInput(input: unknown): unknown {
       schema: schemaToPlainJsonSchema(output.schema),
     },
   };
+}
+
+function normalizeAgentInputs(
+  inputs: unknown,
+  method: "runMany" | "spawnMany",
+): unknown[] {
+  if (!Array.isArray(inputs)) {
+    throw new TypeError(
+      `sdk.agents.${method} expects an input array directly; do not pass { tasks: [...] }`,
+    );
+  }
+  return inputs.map(normalizeAgentInput);
 }
 
 function currentReplBinding(name: ReplBindingName): unknown {

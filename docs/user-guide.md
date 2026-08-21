@@ -235,11 +235,10 @@ An admitted child that has no active run is idle, not working. The client refres
 
 Family navigation applies only while the composer is empty:
 
-1. Press Down to focus the family summary.
-2. Press Enter or Right to open the direct-child browser.
-3. Use Up and Down to select a child.
-4. Press Enter or Right to open the selected child's conversation.
-5. Press Left from an empty child composer to return to its exact parent branch.
+1. Press Right to open the direct-child browser immediately, or press Down to focus the family summary and then Enter or Right.
+2. Use Up and Down to select a child.
+3. Press Enter or Right to open the selected child's conversation.
+4. Press Left from an empty child composer to return to its exact parent branch. The parent browser reopens with the same child selected, ready to select a sibling.
 
 Up, Left, or Escape returns from the focused summary to the composer. Left or Escape closes the browser. Printable input from the focused summary returns to the composer and keeps the typed character. A non-empty draft retains normal editing and submission behavior.
 

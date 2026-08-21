@@ -505,9 +505,9 @@ const proposal = await sdk.agents.proposeProfileUpdate(undefined, {
 
 Methods:
 
-- `spawn(input | taskString)`
+- `spawn(input)`
 - `spawnMany(inputs)`
-- `run(input | taskString)`
+- `run(input)`
 - `runMany(inputs)`
 - `result(handleOrTaskId, { wait?, timeoutMs? })`
 - `get(target?)`
@@ -520,7 +520,17 @@ Methods:
 - `acknowledge(messageId)`
 - `cancel(target, reason?)`
 
-`list()` returns the same additive family projection as the public protocol. Every row includes exact session and branch identity, relationship, name, depth, session and task status, task summary, model configuration, cancellation-request state, derived activity, and a bounded activity reason. Direct children are scoped to task edges admitted from the executing branch. An admitted child without an active run is idle. Parent activity reflects the parent route, while the retained task fields describe the edge that relates the current child to that parent. Missing required state is returned as `unavailable` with `missing_state`; it is not omitted or redirected.
+`list()` returns `{ items: FamilyAgentRecord[] }`, not a bare array. Iterate
+`family.items`:
+
+```ts
+const family = await sdk.agents.list();
+const children = family.items
+  .filter((agent) => agent.relationship === "child")
+  .map((agent) => ({ name: agent.name, status: agent.status }));
+```
+
+Each row includes exact session and branch identity, relationship, name, depth, session and task status, task summary, model configuration, cancellation-request state, derived activity, and a bounded activity reason. Direct children are scoped to task edges admitted from the executing branch. An admitted child without an active run is idle. Parent activity reflects the parent route, while the retained task fields describe the edge that relates the current child to that parent. Missing required state is returned as `unavailable` with `missing_state`; it is not omitted or redirected.
 
 Delegation should decompose work, not pass the caller's full assignment down an agent chain. A task submitted through `run`, `spawn`, `runMany`, or `spawnMany` should be strictly narrower than the caller's task and have a bounded independent result that the caller will use. Before admitting a child, call `list()` when retained parent or child work may already cover that subtask; this is an on-demand coordination check, not a status feed to poll on every model step.
 
@@ -531,6 +541,19 @@ Messages are non-empty UTF-8 strings capped at 32 KiB. They may carry one author
 `run` admits a full autonomous child and waits for its terminal typed result. Omitting `output` returns a text result; `output.schema` requests compact programmatic object data and accepts the same supported Zod, Standard Schema, or restricted plain JSON Schema forms as raw object generation. `runMany` is all-or-nothing at admission and is intended only for bounded independent tasks. Awaited calls reserve console capacity before child admission, so an unsatisfiable nested dependency fails with `CONSOLE_CAPACITY_EXCEEDED` without creating the child.
 
 `spawn` and `spawnMany` always admit runnable detached children and return durable handles immediately. There is no model-facing `run` boolean. Use retained messaging and terminal notices, call `handle.result({ wait?, timeoutMs? })`, or call `sdk.agents.result(handleOrTaskId, options)` later. The bound method is a non-enumerable worker-local convenience over the same result operation; it is absent from JSON serialization, durable state, and a handle reconstructed after worker loss. A reconstructed handle or task ID remains usable through `sdk.agents.result`. A stable `idempotencyKey` recovers the same admission after disconnect or worker loss. `{ wait: false }` reports the current lifecycle; waiting is bounded and returns queued, running, succeeded, blocked, failed, cancelled, budget-exceeded, or unknown without fabricating output. Both result forms use the same validation, capacity reservation, timeout, and error semantics. `profile: { role, purpose, instructions }` supplies the child's complete initial standing behavior. Omitting it uses the sealed task-specialist profile.
+
+`runMany` and `spawnMany` take their input array directly and return their
+result array directly:
+
+```ts
+const results = await sdk.agents.runMany([
+  { name: "Implementation Worker", task: "Implement the bounded change." },
+  { name: "Independent Reviewer", task: "Review the resulting change." },
+]);
+```
+
+Do not pass `{ tasks: [...] }`, and do not look for `results.results` or
+`results.items`.
 
 `send` defaults to `mode: "queue"`. Each queued message owns one separate durable run. `messageResult` is authorized only for the exact sender branch and is observation-only. Before admission it returns queued with zero steps and `admitted: false`; delivery failure returns failed with zero steps without creating a canonical run; after admission it returns the retained run result without adding an invocation `taskId`. It never routes, admits, or reorders work. A console-cell wait first reads the current result, reserves the exact recipient branch's console capacity only when the result is nonterminal, and releases that reservation after completion or timeout. Insufficient capacity fails with `CONSOLE_CAPACITY_EXCEEDED` instead of blocking the caller and recipient indefinitely. Retained legacy `followUp` and `mode: "steer"` messages have no independent result. An idle or stopped recipient starts a queued run immediately; a busy recipient retains queued messages in FIFO order and starts them one at a time after the active run and each earlier queued run terminate. Pending queued content is excluded from the recipient's model context until its run is admitted. `mode: "steer"` enters an active run at its next durable boundary. If the recipient is idle, it is delivered to retained context without waking the recipient.
 

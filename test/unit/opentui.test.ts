@@ -1125,6 +1125,10 @@ describe("OpenTUI interactive terminal", () => {
       task: "Review the implementation",
       name: "Reviewer",
     });
+    await supervisor.agents.spawn(root.sessionId, root.branchId, {
+      task: "Write the release notes",
+      name: "Writer",
+    });
     await supervisor.agents.spawn(child.sessionId, child.branchId, {
       task: "Verify the review",
       name: "Verifier",
@@ -1142,9 +1146,9 @@ describe("OpenTUI interactive terminal", () => {
     const setup = await createTestRenderer({ width: 112, height: 28 });
     app = new OpenTuiApp(setup.renderer, terminal);
     try {
-      let frame = await setup.waitForFrame(value => value.includes("Root agent / main") && value.includes("1 agent: 1 idle"));
+      let frame = await setup.waitForFrame(value => value.includes("Root agent / main") && value.includes("2 agents: 2 idle"));
       expect(frame).not.toContain("\nAGENTS\n");
-      expect(frame).toContain("↓ agents");
+      expect(frame).toContain("↓/→ agents");
 
       await setup.mockInput.typeText("draft stays");
       setup.mockInput.pressKey("\u001b[B");
@@ -1155,11 +1159,17 @@ describe("OpenTUI interactive terminal", () => {
 
       setup.mockInput.pressKey("a", { ctrl: true });
       setup.mockInput.pressKey("k", { ctrl: true });
+      setup.mockInput.pressKey("\u001b[C");
+      frame = await setup.waitForFrame(value =>
+        value.includes("AGENT FAMILY")
+        && value.includes("› ○ Reviewer · idle")
+        && value.includes("Writer"));
+      setup.mockInput.pressKey("\u001b[D");
       setup.mockInput.pressKey("\u001b[B");
-      frame = await setup.waitForFrame(value => value.includes("> 1 agent: 1 idle"));
+      frame = await setup.waitForFrame(value => value.includes("> 2 agents: 2 idle"));
       expect(frame).toContain("Enter/→ agents");
       await setup.mockInput.typeText("x");
-      frame = await setup.waitForFrame(value => value.includes("x") && value.includes("↓ agents"));
+      frame = await setup.waitForFrame(value => value.includes("x") && value.includes("↓/→ agents"));
       expect(frame).not.toContain("AGENT FAMILY");
 
       setup.mockInput.pressKey("u", { ctrl: true });
@@ -1206,8 +1216,21 @@ describe("OpenTUI interactive terminal", () => {
       setup.mockInput.pressKey("k", { ctrl: true });
       setup.mockInput.pressKey("\u001b[D");
       expect(await app.settle()).toBe(true);
-      frame = await setup.waitForFrame(value => value.includes("Root agent / main") && !value.includes("Root agent › Reviewer"));
-      expect(frame).toContain("Enter or → to open");
+      frame = await setup.waitForFrame(value =>
+        value.includes("Root agent / main")
+        && value.includes("AGENT FAMILY")
+        && value.includes("› ○ Reviewer · idle"));
+      setup.mockInput.pressKey("\u001b[B");
+      frame = await setup.waitForFrame(value => value.includes("› ○ Writer · idle"));
+      setup.mockInput.pressKey("\u001b[C");
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value => value.includes("Root agent › Writer / unnamed branch"));
+      setup.mockInput.pressKey("\u001b[D");
+      expect(await app.settle()).toBe(true);
+      frame = await setup.waitForFrame(value =>
+        value.includes("Root agent / main")
+        && value.includes("AGENT FAMILY")
+        && value.includes("› ○ Writer · idle"));
 
       const task = await supervisor.storage.getTask?.(child.taskId);
       expect(task?.status).toBe("admitted");

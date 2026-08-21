@@ -296,6 +296,32 @@ export type ConsoleMailboxMessageResult =
       readonly invocationContract?: AgentInvocationContract;
     };
 export interface ConsoleAgentMessageOptions { readonly direction?: "inbound" | "outbound" | "all"; readonly limit?: number; readonly before?: string; readonly pendingOnly?: boolean; }
+export interface ConsoleFamilyAgentRecord {
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly name: string | null;
+  readonly sessionTitle?: {
+    readonly text: string;
+    readonly source: "model" | "deterministic_fallback" | "explicit" | "ordinary_fallback";
+    readonly verb: string | null;
+    readonly subject: string | null;
+    readonly intentSummary: string | null;
+    readonly sourceMessageCursor: string | null;
+  } | null;
+  readonly relationship: "parent" | "child" | "sibling";
+  readonly depth: number;
+  readonly status: string;
+  readonly taskId: string | null;
+  readonly taskStatus: "pending" | "admitted" | "running" | "completed" | "failed" | "cancelled" | null;
+  readonly task: string | null;
+  readonly model: ModelConfigurationInput | null;
+  readonly cancellationRequested: boolean;
+  readonly activity: "working" | "idle" | "attention" | "ended" | "unavailable";
+  readonly activityReason: "blocked" | "failed" | "budget_exceeded" | "unknown" | "cancellation_pending" | "cancelled" | "archived" | "missing_state" | null;
+}
+export interface ConsoleFamilyListResult {
+  readonly items: readonly ConsoleFamilyAgentRecord[];
+}
 export interface AgentsSdk {
   spawn<I extends ConsoleAgentSpawnInput>(input: I): Promise<ConsoleAgentHandle<I>>;
   spawnMany<I extends readonly ConsoleAgentSpawnInput[]>(inputs: I): Promise<{
@@ -324,7 +350,7 @@ export interface AgentsSdk {
     readonly reason: string;
     readonly evidenceEventIds: readonly string[];
   }): Promise<JsonValue>;
-  list(): Promise<JsonValue>;
+  list(): Promise<ConsoleFamilyListResult>;
   send(input: ConsoleAgentSendInput): Promise<ConsoleMailboxMessageHandle>;
   send(target: string, content: string, options?: Omit<ConsoleAgentSendInput, "target" | "content">): Promise<ConsoleMailboxMessageHandle>;
   messageResult(
