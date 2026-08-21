@@ -138,6 +138,8 @@ test("Chromium observes a live family through the foreground CLI", async () => {
     expect(await page.locator("body").textContent()).not.toContain(fixtureOne.bearerToken);
     await page.getByRole("button", { name: /Root Alpha/ }).click();
     await page.locator("#observer-main").waitFor({ state: "visible" });
+    await page.locator("#overview-panel").waitFor({ state: "visible" });
+    expect(await page.locator("[data-depth=overview]").getAttribute("aria-selected")).toBe("true");
     await page.getByRole("button", { name: "Inspect Root Alpha" }).waitFor();
     expect(await page.locator("#current-work-title").textContent()).toBe("Root Alpha");
     expect(await page.locator(".connection-details").evaluate(element => element.hasAttribute("open"))).toBe(false);
@@ -198,6 +200,10 @@ test("Chromium observes a live family through the foreground CLI", async () => {
     await page.getByRole("button", { name: "Inspect Root Alpha" }).click();
     await page.locator("#inspect-panel").waitFor({ state: "visible" });
     await page.locator("#overview-panel").waitFor({ state: "visible" });
+    await page.locator("#detail-list .conversation-message").first().waitFor();
+    expect(await page.getByRole("button", { name: "Conversation", exact: true }).getAttribute("class")).toContain("active");
+    expect(await page.locator("#detail-list").textContent()).toContain("Inspect the observer fixture");
+    expect(await page.locator("#detail-list").textContent()).toContain("The observer fixture is ready.");
     await page.getByRole("button", { name: "Cells", exact: true }).click();
     await page.locator("#detail-list .detail-card").waitFor();
     const detailText = await page.locator("#detail-list").textContent();

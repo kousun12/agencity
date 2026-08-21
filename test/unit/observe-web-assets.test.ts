@@ -68,6 +68,8 @@ describe("observer browser assets", () => {
 
   test("allowlists bounded lazy detail sections and browser rails", async () => {
     const javascript = await readAsset("app.js");
+    expect(javascript).toContain('const CONVERSATION_SECTION = "conversation"');
+    expect(javascript).toContain('[CONVERSATION_SECTION, "Conversation"]');
     for (const section of [
       "identity",
       "runs",
@@ -124,6 +126,13 @@ describe("observer browser assets", () => {
     const javascript = await readAsset("app.js");
     const css = await readAsset("app.css");
 
+    expect(html).not.toContain('data-depth="conversation"');
+    expect(html).toContain('data-depth="overview" aria-selected="true"');
+    expect(html).not.toContain('id="conversation-panel"');
+    expect(javascript).toContain('void loadDetail(CONVERSATION_SECTION, "", false)');
+    expect(javascript).toContain("function conversationAction");
+    expect(css).toContain(".conversation-message.user");
+    expect(css).toContain(".conversation-action");
     expect(html).toContain('id="current-work-title"');
     expect(html).toContain('class="connection-details"');
     expect(html).toContain('class="route-inspector"');

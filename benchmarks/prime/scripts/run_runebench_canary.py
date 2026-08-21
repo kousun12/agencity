@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 import tomllib
@@ -13,6 +14,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = ROOT / "configs" / "runebench-attack-30m-adaptive.toml"
+DEBUG_EXPORT_ENV = "AGENCITY_BENCHMARK_DEBUG_DIR"
 SCORED_OUTCOMES = {
     "passed",
     "valid_zero",
@@ -27,6 +29,8 @@ def run_canary(
     output_dir: Path,
     *,
     refresh_pins: bool,
+    debug: bool = False,
+    model: str | None = None,
     command_runner: CommandRunner | None = None,
 ) -> int:
     config = config.resolve()
@@ -64,9 +68,7 @@ def run_canary(
     dry_run_dir = output_dir / "dry-run"
     completed = runner(
         [
-            "eval",
-            "@",
-            str(config),
+            *_eval_command(config, model=model),
             "--dry-run",
             "--output-dir",
             str(dry_run_dir),
@@ -77,10 +79,29 @@ def run_canary(
         return completed.returncode
 
     run_dir = output_dir / "run"
-    evaluation = runner(
-        ["eval", "@", str(config), "--output-dir", str(run_dir)],
-        ROOT,
-    )
+    if debug:
+        debug_dir = output_dir / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        previous_debug_dir = os.environ.get(DEBUG_EXPORT_ENV)
+        os.environ[DEBUG_EXPORT_ENV] = str(debug_dir)
+        print("RuneBench canary debug mode: inspection copy will be preserved")
+    else:
+        previous_debug_dir = None
+    try:
+        evaluation = runner(
+            [
+                *_eval_command(config, model=model, debug=debug),
+                "--output-dir",
+                str(run_dir),
+            ],
+            ROOT,
+        )
+    finally:
+        if debug:
+            if previous_debug_dir is None:
+                os.environ.pop(DEBUG_EXPORT_ENV, None)
+            else:
+                os.environ[DEBUG_EXPORT_ENV] = previous_debug_dir
     traces_path = run_dir / "traces.jsonl"
     if not traces_path.is_file():
         print(
@@ -174,6 +195,20 @@ def _is_finite_number(value: object) -> bool:
         return False
 
 
+def _eval_command(
+    config: Path,
+    *,
+    model: str | None = None,
+    debug: bool = False,
+) -> list[str]:
+    command = ["eval", "@", str(config)]
+    if model:
+        command.extend(["--model", model])
+    if debug:
+        command.extend(["--env.agent.harness.debug", "true"])
+    return command
+
+
 def _validate_config(path: Path) -> None:
     value = tomllib.loads(path.read_text(encoding="utf-8"))
     taskset = value.get("env", {}).get("taskset", {})
@@ -238,12 +273,26 @@ def main() -> int:
         action="store_true",
         help="Update every benchmark Agencity source pin to remote main before checking",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "After confirmed service shutdown, export a credential-free inspection "
+            "copy so agencity observe can attach locally"
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        help="Override the config model for dry-run and paid evaluation",
+    )
     args = parser.parse_args()
     try:
         return run_canary(
             args.config,
             args.output_dir,
             refresh_pins=args.refresh_pins,
+            debug=args.debug,
+            model=args.model,
         )
     except (OSError, ValueError, json.JSONDecodeError, tomllib.TOMLDecodeError) as error:
         print(f"RuneBench canary setup failed: {error}", file=sys.stderr)

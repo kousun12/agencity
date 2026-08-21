@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import tarfile
 import tempfile
 import unittest
@@ -23,6 +24,9 @@ from agencity_verifiers.harbor_suite import (
     _require_harbor_reward_evidence,
 )
 from agencity_verifiers.harness import (
+    DEBUG_ARCHIVE_PATH,
+    DEBUG_EXPORT_ENV,
+    DEBUG_EXPORT_SCRIPT,
     PORTABLE_ARTIFACTS_DIR,
     PORTABLE_GIT_EXCLUDES_PATH,
     PORTABLE_PROFILE_PATH,
@@ -32,6 +36,7 @@ from agencity_verifiers.harness import (
     _agencity_command,
     _agencity_service_command,
     _cleanup_portable,
+    _debug_export_command,
     _evaluation_environment,
     _prepare_portable_workspace,
     _shutdown_portable,
@@ -349,6 +354,54 @@ class HarnessIsolationTests(unittest.IsolatedAsyncioTestCase):
         parent.assert_awaited_once()
         self.assertEqual(events, ["collect", "shutdown", "cleanup"])
 
+    async def test_harbor_debug_export_follows_shutdown_and_precedes_cleanup(
+        self,
+    ) -> None:
+        selected = list(
+            TerminalBench2Taskset(
+                TerminalBench2Config(id="agencity-terminal-bench-2")
+            ).load()
+        )[0]
+        trace = SimpleNamespace(
+            info={
+                "agencity": {
+                    "debug": True,
+                    "debug_source_repo": "https://example.test/agencity.git",
+                    "debug_source_ref": "a" * 40,
+                }
+            }
+        )
+        events: list[str] = []
+        debug_export = AsyncMock(
+            side_effect=lambda *_, **__: events.append("debug-export")
+        )
+        with (
+            patch.object(
+                HarborTask,
+                "finalize",
+                AsyncMock(side_effect=lambda *_: events.append("collect")),
+            ),
+            patch(
+                "agencity_verifiers.harbor_suite._shutdown_portable",
+                AsyncMock(side_effect=lambda *_, **__: events.append("shutdown") or "stopped"),
+            ),
+            patch(
+                "agencity_verifiers.harbor_suite._export_debug_inspection",
+                debug_export,
+            ),
+            patch(
+                "agencity_verifiers.harbor_suite._cleanup_portable",
+                AsyncMock(
+                    side_effect=lambda *_: events.append("cleanup")
+                    or "workspace-metadata-and-state-removed"
+                ),
+            ),
+        ):
+            await selected.finalize(trace, SimpleNamespace())
+
+        debug_export.assert_awaited_once()
+        self.assertEqual(events, ["collect", "shutdown", "debug-export", "cleanup"])
+
     async def test_harbor_task_retains_state_when_shutdown_is_unconfirmed(
         self,
     ) -> None:
@@ -442,6 +495,164 @@ class HarnessIsolationTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_debug_cleanup_exports_inspection_copy_then_removes_portable_state(
+        self,
+    ) -> None:
+        harness = AgencityHarness(
+            AgencityHarnessConfig(
+                id="agencity-verifiers",
+                installation="portable",
+                debug=True,
+            )
+        )
+        selected = list(
+            TerminalBench2Taskset(
+                TerminalBench2Config(id="agencity-terminal-bench-2")
+            ).load()
+        )[0]
+        archive = _debug_archive(
+            {
+                "workspace/.agencity/workspace-id": b"workspace-debug\n",
+                "state/agent.db": b"db",
+                "artifacts/blob": b"bytes",
+                "auth.json": b'{"providers":{"openai":{"apiKey":"secret-key"}}}',
+                "workspace/.agencity/service/manifest.json": b'{"bearerToken":"token"}',
+            }
+        )
+        trace = SimpleNamespace(
+            id="trace-debug",
+            info={"agencity": {"status": "succeeded"}},
+            task=SimpleNamespace(id="fix-git", data=selected.data),
+        )
+
+        class Runtime:
+            async def run(self, command: list[str], environment: dict[str, str]):
+                if command == _debug_export_command("/app/personal-site"):
+                    return SimpleNamespace(exit_code=0, stdout="", stderr="")
+                raise AssertionError(f"unexpected command: {command}")
+
+            async def read(self, path: str, max_bytes: int | None = None) -> bytes:
+                self.read_path = path
+                self.max_bytes = max_bytes
+                return archive
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {DEBUG_EXPORT_ENV: directory}),
+            patch(
+                "agencity_verifiers.harness._shutdown_portable",
+                AsyncMock(return_value="stopped"),
+            ),
+            patch(
+                "agencity_verifiers.harness._cleanup_portable",
+                AsyncMock(return_value="workspace-metadata-and-state-removed"),
+            ) as cleanup,
+        ):
+            await harness.cleanup(trace, Runtime())
+            exported = Path(directory) / "trace-debug"
+            self.assertTrue((exported / "workspace/.agencity/workspace-id").is_file())
+            self.assertEqual((exported / "state/agent.db").read_bytes(), b"db")
+            self.assertFalse((exported / "auth.json").exists())
+            self.assertFalse(
+                (exported / "workspace/.agencity/service/manifest.json").exists()
+            )
+            provenance = json.loads(
+                (exported / "provenance.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(provenance["label"], "debug-preserved")
+            self.assertEqual(provenance["task_id"], "fix-git")
+            self.assertIn("bun src/cli.ts observe", (exported / "OBSERVE.md").read_text())
+
+        cleanup.assert_awaited_once()
+        self.assertEqual(trace.info["agencity"]["debug"], True)
+        self.assertEqual(trace.info["agencity"]["debug_export"], "exported")
+        self.assertEqual(
+            trace.info["agencity"]["cleanup"],
+            "workspace-metadata-and-state-removed",
+        )
+
+    async def test_debug_export_failure_does_not_fail_official_cleanup(self) -> None:
+        harness = AgencityHarness(
+            AgencityHarnessConfig(
+                id="agencity-verifiers",
+                installation="portable",
+                debug=True,
+            )
+        )
+        selected = list(
+            TerminalBench2Taskset(
+                TerminalBench2Config(id="agencity-terminal-bench-2")
+            ).load()
+        )[0]
+        trace = SimpleNamespace(
+            id="trace-debug-failed",
+            info={"agencity": {"status": "succeeded"}},
+            task=SimpleNamespace(id="fix-git", data=selected.data),
+        )
+
+        class Runtime:
+            async def run(self, command: list[str], environment: dict[str, str]):
+                return SimpleNamespace(exit_code=1, stdout="", stderr="pack failed")
+
+            async def read(self, path: str, max_bytes: int | None = None) -> bytes:
+                raise AssertionError("debug export should fail before read")
+
+        with (
+            patch(
+                "agencity_verifiers.harness._shutdown_portable",
+                AsyncMock(return_value="stopped"),
+            ),
+            patch(
+                "agencity_verifiers.harness._cleanup_portable",
+                AsyncMock(return_value="workspace-metadata-and-state-removed"),
+            ),
+        ):
+            await harness.cleanup(trace, Runtime())
+        self.assertEqual(trace.info["agencity"]["debug_export"], "failed")
+        self.assertEqual(
+            trace.info["agencity"]["cleanup"],
+            "workspace-metadata-and-state-removed",
+        )
+
+    async def test_debug_skips_export_when_shutdown_is_unconfirmed(self) -> None:
+        harness = AgencityHarness(
+            AgencityHarnessConfig(
+                id="agencity-verifiers",
+                installation="portable",
+                debug=True,
+            )
+        )
+        selected = list(
+            TerminalBench2Taskset(
+                TerminalBench2Config(id="agencity-terminal-bench-2")
+            ).load()
+        )[0]
+        trace = SimpleNamespace(
+            info={"agencity": {"status": "failed"}},
+            task=SimpleNamespace(data=selected.data),
+        )
+        cleanup = AsyncMock()
+        with (
+            patch(
+                "agencity_verifiers.harness._shutdown_portable",
+                AsyncMock(side_effect=RuntimeError("shutdown unconfirmed")),
+            ),
+            patch("agencity_verifiers.harness._cleanup_portable", cleanup),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "shutdown unconfirmed"):
+                await harness.cleanup(trace, SimpleNamespace())
+        cleanup.assert_not_awaited()
+        self.assertEqual(
+            trace.info["agencity"]["debug_export"],
+            "skipped-unconfirmed-shutdown",
+        )
+
+    def test_debug_export_script_excludes_credentials_and_service_manifests(self) -> None:
+        self.assertIn("rm -f \"$stage/auth.json\"", DEBUG_EXPORT_SCRIPT)
+        self.assertIn("rm -rf \"$stage/workspace/.agencity/service\"", DEBUG_EXPORT_SCRIPT)
+        self.assertNotIn("auth.json", _debug_export_command("/app")[4:])
+        self.assertEqual(_debug_export_command("/app")[-1], DEBUG_ARCHIVE_PATH)
+
 
 class BootstrapTests(unittest.TestCase):
     def test_bootstrap_archive_contains_source_and_linux_bun(self) -> None:
@@ -460,6 +671,16 @@ class BootstrapTests(unittest.TestCase):
     def test_source_revision_must_be_full_commit(self) -> None:
         self.assertTrue(_is_commit_sha("a" * 40))
         self.assertFalse(_is_commit_sha("a" * 39))
+
+
+def _debug_archive(files: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+        for name, payload in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            bundle.addfile(info, io.BytesIO(payload))
+    return buffer.getvalue()
 
 
 if __name__ == "__main__":

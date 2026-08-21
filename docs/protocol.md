@@ -50,7 +50,7 @@ Observe exposes only checked-in static assets and these browser routes:
 | `GET /api/bootstrap` | Read availability, bounded root-selector page, current generation, and selected family snapshot. |
 | `POST /api/family/select` | Replace the process-wide disposable family selection after generation validation. This does not call `/product/select`. |
 | `GET /api/family/snapshot` | Read the current bounded family projection and observer sequence. |
-| `GET /api/family/detail` | Read one allowlisted, lazy, bounded inspector page for an exact projected route and optional item. |
+| `GET /api/family/detail` | Read one allowlisted, lazy, bounded conversation or inspector page for an exact projected route and optional item. |
 | `GET /api/family/stream` | Follow process-local observer envelopes after one observer sequence within one generation. |
 
 Every API response uses the `agencity.observe.v1` envelope. The API has no generic proxy, SQL route, artifact-byte route, managed URL route, or control action. Browser-facing family snapshots are capped at 512 KiB, load at most 64 routes with four concurrent reads, and retain bounded graph/message metadata. Root pages contain at most 100 rows and 256 KiB. Detail pages contain at most 50 items and 128 KiB. One observer SSE envelope is at most 64 KiB; pending browser queues, the 200-item/1 MiB activity rail, and the 512-envelope/2 MiB replay buffer are bounded.

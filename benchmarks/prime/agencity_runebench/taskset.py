@@ -33,7 +33,7 @@ DATASET = (
     "maxbittker/runebench@"
     "sha256:4bb3430af2ef3a320bd3dfeeab2447fbf9e0093452ad747997186a85a060de28"
 )
-TREATMENT = "agencity-runebench-repl-v1"
+TREATMENT = "agencity-runebench-repl-v2"
 SOURCE_CATALOG_PATH = (
     Path(__file__).resolve().parent.parent / "manifests" / "runebench-catalog.json"
 )
@@ -583,12 +583,14 @@ and wiki pages as guidance rather than current world state: confirm tools,
 inventory, nearby entities, requirements, and action results through `rs`, and
 confirm exact callable signatures in `/app/sdk/API.md`.
 
-The scored skill is **{SCORED_SKILL_TOKEN}**. Use one initial discovery cell,
-not one model turn per file. The cell may read the complete 579-line pinned API,
-the scored skill's wiki page, the matching upstream learning when present, and
-the learning/skill filename index in parallel. Return only those bounded
-documents plus a compact live-state projection; do not return the complete game
-state.
+The scored skill is **{SCORED_SKILL_TOKEN}**. Begin with an initial discovery
+phase before game actions. Batch independent reads and live-state inspection
+instead of using one model turn per file. The example below is one efficient
+starting cell, not a limit on discovery. It may read the complete 579-line
+pinned API, the scored skill's wiki page, the matching upstream learning when
+present, and the learning/skill filename index in parallel. Return only those
+bounded documents plus a compact live-state projection; do not return the
+complete game state.
 
 ```ts
 const scoredSkill = "{SCORED_SKILL_TOKEN}";
@@ -658,14 +660,27 @@ return {{
 ```
 
 If the exact learning filename is absent, use the returned index to select at
-most one clearly relevant upstream learning in the next experiment cell. Do
-not repeatedly search API or knowledge files after this discovery result. The
-optional document records explicitly report `read`, `absent`, or `unavailable`;
-an absent learning is normal, while an unavailable indexed file is evidence to
-use the other retained sources rather than rerun the whole discovery cell.
-Before acting, reduce the sources into an executable pipeline: required inputs,
-how to acquire them, the target or station, the exact `rs` or `bot` call, and
-the live-state or metric transition that proves the action worked.
+most one clearly relevant upstream learning in the next discovery or experiment
+cell. The optional document records explicitly report `read`, `absent`, or
+`unavailable`; an absent learning is normal, while an unavailable indexed file
+is evidence to use the other retained sources.
+
+After reviewing the initial discovery evidence, make an initial plan and choose
+an initial strategy before the first game action. Record the plan in
+`runebench.progress`: required inputs, how to acquire them, the target or
+station, the exact `rs` or `bot` action, the live-state and scored-skill metric
+that prove it worked, at least one viable alternative when the evidence exposes
+one, open questions, and the next experiment. Treat this plan as a hypothesis,
+not a fixed workflow.
+
+Discovery remains available throughout the run. Return to focused API,
+learning, wiki, or live-state inspection whenever new evidence, a missing
+prerequisite, an unexpected result, a route uncertainty, a high failure rate,
+or a stalled official peak creates a specific question. Update the retained
+plan and strategy when evidence changes them, including what changed and why.
+Alternate discovery and action as the evidence requires. Do not repeat
+unchanged searches or reread sources that already answer the current question,
+and do not load the wiki corpus wholesale.
 
 ## Measured experiments
 
@@ -910,7 +925,7 @@ class RuneBenchConfig(HarborSuiteConfig):
     dataset: Literal[
         "maxbittker/runebench@sha256:4bb3430af2ef3a320bd3dfeeab2447fbf9e0093452ad747997186a85a060de28"
     ] = DATASET
-    treatment: Literal["agencity-runebench-repl-v1"] = TREATMENT
+    treatment: Literal["agencity-runebench-repl-v2"] = TREATMENT
     learning_mode: LearningMode = "within-run"
     ignore_dockerfile: Literal[True] = True
     require_image: Literal[False] = False

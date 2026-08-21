@@ -17,7 +17,9 @@
   const GRAPH_MIN_ZOOM = 0.08;
   const GRAPH_MAX_ZOOM = 1.6;
   const GRAPH_ZOOM_FACTOR = 1.2;
+  const CONVERSATION_SECTION = "conversation";
   const DETAIL_SECTIONS = Object.freeze([
+    [CONVERSATION_SECTION, "Conversation"],
     ["identity", "Identity"],
     ["runs", "Runs"],
     ["model_attempts", "Model attempts"],
@@ -558,6 +560,9 @@
     renderGraph();
     renderCurrentWork();
     renderSelectedRoute();
+    if (state.inspectorOpen && state.detailSection === CONVERSATION_SECTION) {
+      void loadDetail(CONVERSATION_SECTION, "", false);
+    }
     setStatus(
       routeTruncated
         ? availabilityMessage("family_truncated")
@@ -882,7 +887,7 @@
       clearDetail();
       renderGraph();
       renderSelectedRoute();
-      void loadDetail("identity", "", false);
+      void loadDetail(CONVERSATION_SECTION, "", false);
     });
     view["graph-nodes"].appendChild(button);
   }
@@ -894,6 +899,85 @@
     }
     view["overview-panel"].hidden = selected !== "overview";
     view["events-panel"].hidden = selected !== "events";
+    if (selected === "overview") renderGraph();
+  }
+
+  function conversationItem(itemValue) {
+    const item = asObject(itemValue);
+    const data = asObject(firstValue(item, ["data"], {}));
+    if (data.entryType === "action") return conversationAction(data);
+    const role = data.role === "user" ? "user" : "assistant";
+    const card = document.createElement("article");
+    card.className = "conversation-message " + role;
+    const header = document.createElement("div");
+    header.className = "conversation-message-header";
+    text(header, role === "user" ? "User" : "Agent", "conversation-role");
+    const producer = boundedText(data.producer, 120);
+    if (producer) text(header, producer, "conversation-producer");
+    card.appendChild(header);
+    const content = document.createElement("div");
+    content.className = "conversation-content";
+    appendFormattedValue(content, data.content);
+    card.appendChild(content);
+    return card;
+  }
+
+  function conversationField(parent, label, value, className) {
+    if (value === null || value === undefined || boundedText(value) === "") return;
+    const group = document.createElement("div");
+    group.className = className || "conversation-action-field";
+    text(group, label, "conversation-action-label");
+    const content = document.createElement("div");
+    appendFormattedValue(content, value);
+    group.appendChild(content);
+    parent.appendChild(group);
+  }
+
+  function conversationAction(data) {
+    const details = document.createElement("details");
+    details.className = "conversation-action";
+    const summary = document.createElement("summary");
+    const tool = boundedText(data.tool, 80) || "model action";
+    const status = boundedText(data.status, 80);
+    text(summary, tool, "conversation-tool");
+    if (status) text(summary, humanState(status), "conversation-action-status");
+    const ordinal = Number(data.ordinal);
+    if (Number.isFinite(ordinal)) text(summary, "Step " + ordinal, "conversation-action-step");
+    details.appendChild(summary);
+    const body = document.createElement("div");
+    body.className = "conversation-action-body";
+    conversationField(body, data.actionType === "typescript" ? "TypeScript" : "Submission", data.input, "conversation-action-source");
+    conversationField(body, "Value", data.finishValue, "conversation-action-result");
+    conversationField(body, "Rejected", data.rejection);
+    const cell = asObject(data.cell);
+    conversationField(body, "Logs", cell.logs, "conversation-action-logs");
+    conversationField(body, "Result", cell.result, "conversation-action-result");
+    conversationField(body, "Error", cell.error, "conversation-action-error");
+    const effects = asArray(data.effects);
+    if (effects.length) {
+      const effectList = document.createElement("div");
+      effectList.className = "conversation-effects";
+      text(effectList, "Tool effects", "conversation-action-label");
+      for (const effectValue of effects) {
+        const effect = asObject(effectValue);
+        const effectDetails = document.createElement("details");
+        const effectSummary = document.createElement("summary");
+        const effectName = [boundedText(effect.executor, 80), boundedText(effect.operation, 100)]
+          .filter(Boolean).join(" · ") || "Effect";
+        text(effectSummary, effectName);
+        text(effectSummary, humanState(effect.status || "unknown"), "conversation-action-status");
+        effectDetails.appendChild(effectSummary);
+        conversationField(effectDetails, "Output", effect.output);
+        conversationField(effectDetails, "Error", effect.error, "conversation-action-error");
+        effectList.appendChild(effectDetails);
+      }
+      if (data.effectsTruncated === true) {
+        text(effectList, "Additional effects are available in the Effects section.", "state-note");
+      }
+      body.appendChild(effectList);
+    }
+    details.appendChild(body);
+    return details;
   }
 
   function renderDetailSectionButtons() {
@@ -931,6 +1015,7 @@
     state.detailSection = "";
     state.detailNextCursor = "";
     state.detailTruncated = false;
+    view["detail-list"].classList.remove("conversation-list");
     view["detail-list"].replaceChildren();
     view["detail-state"].textContent = "Choose a section to load bounded detail.";
     view["detail-pager"].hidden = true;
@@ -942,7 +1027,16 @@
     const requestId = ++state.detailRequest;
     state.detailSection = section;
     renderDetailSectionButtons();
-    view["detail-state"].textContent = "Loading bounded " + humanState(section) + " detail…";
+    const conversation = section === CONVERSATION_SECTION;
+    view["detail-state"].textContent = conversation
+      ? append
+        ? "Loading earlier messages and actions…"
+        : "Loading the latest bounded conversation…"
+      : "Loading bounded " + humanState(section) + " detail…";
+    view["detail-list"].classList.toggle("conversation-list", conversation);
+    view["detail-more"].textContent = conversation
+      ? "Load earlier messages and actions"
+      : "Load next page";
     if (!append) view["detail-list"].replaceChildren();
     const query = new URLSearchParams();
     query.set("section", section);
@@ -971,6 +1065,39 @@
     return item === null ? [] : [item];
   }
 
+  function applyConversationDetailPage(holder, items, prepend) {
+    const priorHeight = view["detail-list"].scrollHeight;
+    const priorTop = view["detail-list"].scrollTop;
+    const fragment = document.createDocumentFragment();
+    for (const item of items) fragment.appendChild(conversationItem(item));
+    if (prepend) {
+      view["detail-list"].prepend(fragment);
+      view["detail-list"].scrollTop =
+        priorTop + view["detail-list"].scrollHeight - priorHeight;
+    } else {
+      view["detail-list"].replaceChildren(fragment);
+      view["detail-list"].scrollTop = view["detail-list"].scrollHeight;
+    }
+    const pagination = asObject(firstValue(holder, ["pagination"], {}));
+    const truncation = asObject(firstValue(holder, ["truncation"], {}));
+    state.detailNextCursor = boundedText(
+      firstValue(pagination, ["nextCursor", "next"], firstValue(holder, ["nextCursor", "next"], "")),
+      1024
+    );
+    state.detailTruncated =
+      Boolean(firstValue(holder, ["truncated"], false)) ||
+      truncation.itemLimit === true ||
+      truncation.byteLimit === true;
+    const snapshotCursor = boundedText(firstValue(holder, ["snapshotCursor", "cursor"], ""), 128);
+    const count = view["detail-list"].childElementCount;
+    view["detail-state"].textContent = count
+      ? count + " visible conversation item" + (count === 1 ? "" : "s") +
+        (snapshotCursor ? " · snapshot cursor " + snapshotCursor : "") +
+        (state.detailNextCursor ? " · Earlier activity is available." : "")
+      : "No committed user or assistant messages or model actions are available.";
+    view["detail-pager"].hidden = !state.detailNextCursor;
+  }
+
   function applyDetailPage(page, append) {
     const data = asObject(page);
     const holder = asObject(firstValue(data, ["page", "detail"], data));
@@ -985,6 +1112,10 @@
       return;
     }
     const items = detailItemsFrom(page);
+    if (state.detailSection === CONVERSATION_SECTION) {
+      applyConversationDetailPage(holder, items, append);
+      return;
+    }
     if (!append) view["detail-list"].replaceChildren();
     for (const item of items) renderDetailItem(item);
     const pagination = asObject(firstValue(holder, ["pagination"], {}));

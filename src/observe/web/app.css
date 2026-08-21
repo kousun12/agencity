@@ -379,6 +379,164 @@ main {
   background: rgba(17, 23, 34, 0.92);
 }
 
+.conversation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  overflow: auto;
+  height: calc(100vh - 16rem);
+  min-height: 20rem;
+  margin: 0;
+  padding: 0.35rem 0.6rem 1rem;
+  overscroll-behavior: contain;
+}
+
+.conversation-message {
+  align-self: flex-start;
+  width: 88%;
+  min-width: 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.8rem;
+  background: #151d29;
+}
+
+.conversation-message.user {
+  align-self: flex-end;
+  border-color: #31516a;
+  background: #172536;
+}
+
+.conversation-message-header {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  margin-bottom: 0.45rem;
+}
+
+.conversation-role {
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.conversation-producer,
+.conversation-action-step {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.conversation-content,
+.conversation-action-field > div,
+.conversation-action-source > div,
+.conversation-action-logs > div,
+.conversation-action-result > div,
+.conversation-action-error > div {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.conversation-content {
+  color: #e4eaf2;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.conversation-action {
+  align-self: center;
+  width: 96%;
+  min-width: 0;
+  border: 1px solid #29394b;
+  border-radius: 0.7rem;
+  background: #101722;
+}
+
+.conversation-action > summary,
+.conversation-effects details > summary {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  cursor: pointer;
+  padding: 0.65rem 0.8rem;
+}
+
+.conversation-tool {
+  color: #c9d7e8;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.conversation-action-status {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-transform: capitalize;
+}
+
+.conversation-action-step {
+  order: -1;
+}
+
+.conversation-action-body {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0 0.8rem 0.8rem;
+}
+
+.conversation-action-field,
+.conversation-action-source,
+.conversation-action-logs,
+.conversation-action-result,
+.conversation-action-error {
+  min-width: 0;
+  padding: 0.65rem;
+  border: 1px solid rgba(146, 160, 181, 0.16);
+  border-radius: 0.55rem;
+  background: #0c121b;
+}
+
+.conversation-action-source,
+.conversation-action-logs {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.conversation-action-error {
+  border-color: rgba(251, 113, 133, 0.32);
+  color: #fecdd3;
+}
+
+.conversation-action-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: var(--muted);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.conversation-effects {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.conversation-effects details {
+  border: 1px solid rgba(146, 160, 181, 0.16);
+  border-radius: 0.5rem;
+  background: #0d141e;
+}
+
+.conversation-effects details > .conversation-action-field,
+.conversation-effects details > .conversation-action-error {
+  margin: 0 0.6rem 0.6rem;
+}
+
 .graph-panel {
   display: flex;
   flex-direction: column;
@@ -725,6 +883,12 @@ main {
   margin-bottom: 0.8rem;
 }
 
+.detail-list.conversation-list {
+  display: flex;
+  gap: 0.8rem;
+  margin: 0 0 0.8rem;
+}
+
 .detail-card {
   min-width: 0;
   max-width: 100%;
@@ -859,6 +1023,15 @@ main {
 
   .graph-heading-actions {
     justify-items: start;
+  }
+
+  .conversation-message,
+  .conversation-action {
+    width: 100%;
+  }
+
+  .conversation-list {
+    padding-inline: 0;
   }
 
 }

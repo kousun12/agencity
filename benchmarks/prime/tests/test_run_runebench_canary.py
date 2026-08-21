@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from scripts.run_runebench_canary import (
+    DEBUG_EXPORT_ENV,
     DEFAULT_CONFIG,
     run_canary,
     scoring_completeness_error,
@@ -70,6 +73,74 @@ class RuneBenchCanaryRunnerTests(unittest.TestCase):
         self.assertEqual(
             commands[4][1:3],
             ["-m", "agencity_verifiers.reporting"],
+        )
+
+    def test_debug_mode_overrides_model_and_reserves_an_export_directory(self) -> None:
+        commands: list[list[str]] = []
+        debug_environment: list[str | None] = []
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(DEBUG_EXPORT_ENV, None)
+            output = Path(directory) / "canary"
+
+            def runner(
+                command: list[str],
+                _cwd: Path,
+            ) -> subprocess.CompletedProcess[object]:
+                commands.append(command)
+                if command[:2] == ["eval", "@"] and "--dry-run" not in command:
+                    debug_environment.append(os.environ.get(DEBUG_EXPORT_ENV))
+                if "preflight_suite.py" in " ".join(command):
+                    path = Path(command[command.index("--output") + 1])
+                    path.write_text(json.dumps(SELECTION), encoding="utf-8")
+                elif command[:2] == ["eval", "@"] and "--dry-run" not in command:
+                    run = Path(command[command.index("--output-dir") + 1])
+                    run.mkdir(parents=True)
+                    (run / "traces.jsonl").write_text("{}\n", encoding="utf-8")
+                elif "agencity_verifiers.reporting" in command:
+                    path = Path(command[command.index("--output") + 1])
+                    path.write_text(
+                        json.dumps(
+                            _summary(
+                                outcome="passed",
+                                reward=100.0,
+                            )
+                        ),
+                        encoding="utf-8",
+                    )
+                return subprocess.CompletedProcess(command, 0)
+
+            self.assertEqual(
+                run_canary(
+                    DEFAULT_CONFIG,
+                    output,
+                    refresh_pins=False,
+                    debug=True,
+                    model="gpt-5.6-terra",
+                    command_runner=runner,
+                ),
+                0,
+            )
+            self.assertTrue((output / "debug").is_dir())
+            self.assertNotIn(DEBUG_EXPORT_ENV, os.environ)
+
+        dry_run = commands[2]
+        evaluation = commands[3]
+        self.assertEqual(debug_environment, [str((output / "debug").resolve())])
+        self.assertIn("--model", dry_run)
+        self.assertIn("gpt-5.6-terra", dry_run)
+        self.assertNotIn("--env.agent.harness.debug", dry_run)
+        self.assertEqual(
+            evaluation[evaluation.index("--model") : evaluation.index("--model") + 2],
+            ["--model", "gpt-5.6-terra"],
+        )
+        self.assertEqual(
+            evaluation[
+                evaluation.index("--env.agent.harness.debug") : evaluation.index(
+                    "--env.agent.harness.debug"
+                )
+                + 2
+            ],
+            ["--env.agent.harness.debug", "true"],
         )
 
     def test_refresh_is_opt_in_and_followed_by_a_pin_check(self) -> None:

@@ -399,6 +399,18 @@ failure satisfy this scoring-completeness check; a `TaskError`, missing trace,
 cleanup or scorer error, duplicate task record, or missing selected task does
 not.
 
+Pass `--debug` to preserve a credential-free inspection copy after confirmed
+service shutdown so `agencity observe` can attach locally. Pass `--model` to
+override the config model without changing the task or treatment. Example:
+
+```sh
+OPENAI_API_KEY=... uv run --locked python scripts/run_runebench_canary.py \
+  --output-dir outputs/runebench-attack-30m-adaptive-terra-xhigh-debug \
+  --refresh-pins \
+  --debug \
+  --model gpt-5.6-terra
+```
+
 Do not start the 16-skill treatment until this exact canary has valid official
 scorer evidence, confirmed service/process cleanup, and no controller or tracker
 regression.
@@ -561,6 +573,49 @@ Managed trainer output is available through
 Do not observe by starting another `BotSDK`, attaching a second controller, or
 writing into the container. Competing controllers can disconnect or replace
 the scored agent's live game connection.
+
+### Post-run Observe inspection
+
+`agencity observe` is a live read-only client of a managed workspace protocol
+source; it is not a `traces.jsonl` viewer or historical-trace importer. After a
+successful default RuneBench rollout, the harness confirms managed-service and
+process shutdown, removes the portable Agencity state, and then removes the
+task container. The retained evaluator output is sufficient for trace analysis
+but cannot produce an Observe URL for the completed workspace.
+
+Opt in to post-run inspection with `--debug` on the canary command or
+`--env.agent.harness.debug true` on `eval`. Debug mode is disabled by default
+and labels the run `debug-preserved`. After confirmed owned-service shutdown
+and managed-process cleanup, it exports the canonical workspace database,
+referenced artifact bytes, profile catalog records, and
+source/task/model/treatment provenance into the run output. The export excludes
+`auth.json`, discovery bearer tokens, live process credentials, and
+nonportable execution leases. Official scoring and portable-state removal
+continue even if that export fails.
+
+Preserved files are not themselves an Observe source. After the evaluator
+exits, start a local managed service against the inspection copy, then attach
+Observe from the Agencity checkout:
+
+```sh
+INSPECT=outputs/<run>/debug/<trace-id>
+bun src/cli.ts status --json \
+  --workspace-root "$INSPECT/workspace" \
+  --state-dir "$INSPECT/state" \
+  --artifacts "$INSPECT/artifacts" \
+  --profile "$INSPECT/profile.db"
+
+bun src/cli.ts observe --workspace-root "$INSPECT/workspace"
+```
+
+The inspection service may run ordinary startup recovery against already
+terminal work; Observe remains read-only and does not start, stop, or mutate
+the managed service. This first version does not provide a mutation-blocked
+replay adapter. The exported workspace and browser view can contain model text,
+tool results, repository content, and benchmark material. Keep them local and
+uncommitted. Delete the inspection copy when the operator is done. Observe
+inspection is diagnostic evidence; it does not replace the official RuneBench
+scorer or make an unscored run official.
 
 ### Custom task selections
 
@@ -806,5 +861,7 @@ behavior rather than a core runtime semantic.
   repair, so it produced no official score.
 - No paid 16-skill leaderboard-comparable run is verified.
 - A full run is long, expensive, and operator-gated.
+- No opt-in post-run workspace export or Observe replay source is implemented;
+  successful cleanup removes the state required for browser inspection.
 - RuneBench is noisy; one rollout is integration evidence, not a stable harness
   comparison.

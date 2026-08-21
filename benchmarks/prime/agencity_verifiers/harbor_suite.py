@@ -12,7 +12,11 @@ import verifiers.v1 as vf
 from verifiers.v1.tasksets.harbor import HarborConfig, HarborData, HarborTask, HarborTaskset
 from verifiers.v1.tasksets.harbor.taskset import MAX_REWARD_BYTES, REWARD_JSON_ADAPTER
 
-from agencity_verifiers.harness import _cleanup_portable, _shutdown_portable
+from agencity_verifiers.harness import (
+    _cleanup_portable,
+    _export_debug_inspection,
+    _shutdown_portable,
+)
 from agencity_verifiers.selection import (
     SelectionSpec,
     catalog_digest,
@@ -96,7 +100,28 @@ class HarborSuiteTask(HarborTask):
                 except Exception:
                     metadata["service_shutdown"] = "unconfirmed"
                     metadata["cleanup"] = "retained-after-unconfirmed-shutdown"
+                    if metadata.get("debug") is True:
+                        metadata["debug_export"] = "skipped-unconfirmed-shutdown"
                     raise
+                if metadata.get("debug") is True:
+                    source_repo = metadata.get("debug_source_repo")
+                    source_ref = metadata.get("debug_source_ref")
+                    if not isinstance(source_repo, str) or not isinstance(
+                        source_ref, str
+                    ):
+                        metadata["debug_export"] = "failed"
+                        metadata["debug_export_error"] = (
+                            "debug source provenance is missing"
+                        )
+                    else:
+                        await _export_debug_inspection(
+                            runtime,
+                            self.data.workdir,
+                            trace,
+                            metadata,
+                            source_repo=source_repo,
+                            source_ref=source_ref,
+                        )
                 try:
                     metadata["cleanup"] = await _cleanup_portable(
                         runtime, self.data.workdir

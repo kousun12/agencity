@@ -208,6 +208,170 @@ describe("observer bounds", () => {
     expect(page.truncation.byteLimit).toBe(true);
     expect(serializedUtf8Bytes(page)).toBeLessThanOrEqual(OBSERVER_BOUNDS.detailPageBytes);
   });
+
+  test("returns the latest conversation page in chronological order and pages backward", () => {
+    const route = { sessionId: "root", branchId: "main" };
+    const messages = Array.from({ length: 8 }, (_, index) => ({
+      id: `message-${index}`,
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: `Message ${index}`,
+      eventId: `message-event-${index}`,
+      eventCursor: String(index + 2),
+      schemaVersion: EVENT_SCHEMA_VERSION,
+      modelCallId: index % 2 === 0 ? null : `call-${index}`,
+    }));
+    const value = state("root", "main", {
+      messages,
+      appliedEventIds: ["created-root", ...messages.map(message => message.eventId)],
+    });
+    const snapshot = routeSnapshot(route, value);
+
+    const latest = deriveObserverDetailPage(snapshot, "conversation", { limit: 3 });
+    expect(latest.items.map(item => item.id)).toEqual([
+      "message:message-5",
+      "message:message-6",
+      "message:message-7",
+    ]);
+    expect(latest.items.map(item => item.data.content)).toEqual([
+      expect.objectContaining({ text: "Message 5" }),
+      expect.objectContaining({ text: "Message 6" }),
+      expect.objectContaining({ text: "Message 7" }),
+    ]);
+    expect(latest.items[0]?.provenance.exactEventCursor).toBe("7");
+    expect(latest.pagination.nextCursor).not.toBeNull();
+
+    const earlier = deriveObserverDetailPage(snapshot, "conversation", {
+      limit: 3,
+      cursor: latest.pagination.nextCursor,
+    });
+    expect(earlier.items.map(item => item.id)).toEqual([
+      "message:message-2",
+      "message:message-3",
+      "message:message-4",
+    ]);
+    expect(serializedUtf8Bytes(latest)).toBeLessThanOrEqual(OBSERVER_BOUNDS.detailPageBytes);
+  });
+
+  test("interleaves model actions with messages and includes bounded cell effects", () => {
+    const route = { sessionId: "root", branchId: "main" };
+    const profile = fixtureAgentProfile("root");
+    const value = state("root", "main", {
+      messages: [{
+        id: "user-message",
+        role: "user",
+        content: "Inspect the repository",
+        eventId: "user-message-event",
+        eventCursor: "2",
+        schemaVersion: EVENT_SCHEMA_VERSION,
+        modelCallId: null,
+      }, {
+        id: "assistant-message",
+        role: "assistant",
+        content: "Inspection complete",
+        eventId: "assistant-message-event",
+        eventCursor: "6",
+        schemaVersion: EVENT_SCHEMA_VERSION,
+        modelCallId: "call",
+      }],
+      agentRuns: {
+        run: {
+          id: "run",
+          task: "Inspect the repository",
+          requestKey: "request",
+          profilePin: {
+            profileVersionId: profile.profileVersionId,
+            agentPromptDigest: profile.promptDigest,
+            promptContractId: profile.promptContractId,
+          },
+          goalId: null,
+          goalMode: "none",
+          wakeId: null,
+          status: "succeeded",
+          steps: [{
+            id: "step",
+            ordinal: 1,
+            contextId: "context",
+            callId: "call",
+            effectId: "model-effect",
+            actionId: "action",
+            observationEventIds: [],
+            modelAttempts: [],
+            action: {
+              protocol: "agencity.agent-action",
+              version: 1,
+              type: "typescript",
+              code: "const result = await sdk.shell.run('pwd');",
+            },
+            eventId: "action-event",
+          }],
+          goalChecks: {},
+          cancellationRequested: false,
+          requestEventId: "run-request-event",
+          eventId: "run-event",
+        },
+      },
+      cells: {
+        "agent-run-cell-action": {
+          id: "agent-run-cell-action",
+          code: "const result = await sdk.shell.run('pwd');",
+          status: "committed",
+          attempts: 1,
+          result: { cwd: "/workspace" },
+          logs: ["done"],
+          logStreams: ["stdout"],
+          eventId: "cell-event",
+        },
+      },
+      effects: {
+        "shell-effect": {
+          id: "shell-effect",
+          executor: "shell",
+          operation: "run",
+          input: { command: "pwd" },
+          origin: { kind: "cell", cellId: "agent-run-cell-action" },
+          idempotencyKey: "shell-effect",
+          idempotent: true,
+          attempts: 1,
+          status: "succeeded",
+          output: { stdout: "/workspace" },
+          eventId: "shell-effect-event",
+        },
+      },
+      appliedEventIds: [
+        "created-root",
+        "user-message-event",
+        "run-request-event",
+        "action-event",
+        "cell-event",
+        "shell-effect-event",
+        "assistant-message-event",
+        "run-event",
+      ],
+    });
+
+    const page = deriveObserverDetailPage(routeSnapshot(route, value), "conversation");
+    expect(page.items.map(item => item.id)).toEqual([
+      "message:user-message",
+      "action:run:step",
+      "message:assistant-message",
+    ]);
+    expect(page.items[1]?.data).toMatchObject({
+      entryType: "action",
+      tool: "bun_console",
+      actionType: "typescript",
+      status: "committed",
+      cell: {
+        id: "agent-run-cell-action",
+        status: "committed",
+      },
+      effects: [{
+        id: "shell-effect",
+        executor: "shell",
+        operation: "run",
+        status: "succeeded",
+      }],
+    });
+  });
 });
 
 describe("observer family discovery", () => {
@@ -693,7 +857,7 @@ describe("observer projections", () => {
     }
 
     const sections = [
-      "identity", "runs", "model_attempts", "cells", "effects", "tasks",
+      "conversation", "identity", "runs", "model_attempts", "cells", "effects", "tasks",
       "mailbox", "budget", "goals", "gates", "artifacts", "terminal_outcomes",
     ] as const;
     for (const section of sections) {

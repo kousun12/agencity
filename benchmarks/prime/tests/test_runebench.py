@@ -21,6 +21,7 @@ from agencity_runebench.taskset import (
     RATE_COMMAND_TEMPLATE,
     REPL_CONNECTION_SOURCE,
     REPL_GUIDANCE,
+    TREATMENT,
     TRACKING_FILE,
     WITHIN_RUN_GUIDANCE,
     RuneBenchConfig,
@@ -52,9 +53,10 @@ class RuneBenchCatalogTests(unittest.TestCase):
             len({task["image_manifest_digest"] for task in catalog["tasks"]}),
             1,
         )
-        treatment = catalog["treatments"]["agencity-runebench-repl-v1"]
+        treatment = catalog["treatments"][TREATMENT]
         self.assertEqual(treatment["source_memory_gb"], 4)
         self.assertEqual(treatment["treatment_memory_gb"], 8)
+        self.assertNotIn("agencity-runebench-repl-v1", catalog["treatments"])
         for task in catalog["tasks"]:
             self.assertTrue(task["image"].endswith(task["image_manifest_digest"]))
             self.assertEqual(task["workdir"], "/app")
@@ -178,7 +180,15 @@ class RuneBenchCatalogTests(unittest.TestCase):
         self.assertIn("The official peak rate, not cumulative XP", REPL_GUIDANCE)
         self.assertIn("deadline.remainingMs", REPL_GUIDANCE)
         self.assertIn('state.set("runebench.progress"', REPL_GUIDANCE)
-        self.assertIn("one initial discovery cell", REPL_GUIDANCE)
+        self.assertIn(
+            "Begin with an initial discovery\nphase before game actions",
+            REPL_GUIDANCE,
+        )
+        self.assertIn("starting cell, not a limit on discovery", REPL_GUIDANCE)
+        self.assertIn("make an initial plan and choose\nan initial strategy", REPL_GUIDANCE)
+        self.assertIn("Treat this plan as a hypothesis", REPL_GUIDANCE)
+        self.assertIn("Discovery remains available throughout the run", REPL_GUIDANCE)
+        self.assertIn("Update the retained\nplan and strategy", REPL_GUIDANCE)
         self.assertIn("/app/sdk/API.md", REPL_GUIDANCE)
         rendered = render_repl_guidance("Woodcutting")
         self.assertIn('const scoredSkill = "Woodcutting"', rendered)

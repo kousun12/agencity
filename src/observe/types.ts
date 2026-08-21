@@ -166,6 +166,7 @@ export interface ObserverFamilyOverviewDto {
 }
 
 export const OBSERVER_DETAIL_SECTIONS = [
+  "conversation",
   "identity",
   "runs",
   "model_attempts",

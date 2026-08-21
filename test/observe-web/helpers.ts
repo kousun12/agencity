@@ -111,6 +111,12 @@ function initialStates(): AgentState[] {
     sessionId: ROOT_ALPHA.sessionId,
     sessionName: "Root Alpha",
   }));
+  const userMessage = nextEvent(alpha, "MessageAppended", {
+    messageId: "root-alpha-user-message",
+    role: "user",
+    content: "Inspect the observer fixture",
+  }, "client");
+  alpha = reduceAgentState(alpha, userMessage);
   const proposed = nextEvent(alpha, "CellProposed", {
     cellId: "hostile-cell",
     code: HOSTILE_DETAIL_TEXT,
@@ -137,6 +143,12 @@ function initialStates(): AgentState[] {
     exports: [],
   }, "console");
   alpha = reduceAgentState(alpha, committed);
+  const assistantMessage = nextEvent(alpha, "MessageAppended", {
+    messageId: "root-alpha-assistant-message",
+    role: "assistant",
+    content: "The observer fixture is ready.",
+  }, "model");
+  alpha = reduceAgentState(alpha, assistantMessage);
 
   const beta = reduceAgentState(undefined, sessionCreated({
     sessionId: ROOT_BETA.sessionId,

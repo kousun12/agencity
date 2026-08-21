@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import os
 import shlex
-from typing import Literal
+import tarfile
+import tempfile
+from pathlib import Path
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import verifiers.v1 as vf
@@ -29,6 +34,43 @@ PORTABLE_BUN_PATH = f"{AGENCITY_DIR}/bin/bun"
 PORTABLE_GIT_EXCLUDES_PATH = f"{PORTABLE_ROOT}/git-excludes"
 PORTABLE_SHUTDOWN_TIMEOUT_SECONDS = 30
 ADAPTER_DIAGNOSTIC_STREAM_BYTES = 4 * 1024
+DEBUG_EXPORT_ENV = "AGENCITY_BENCHMARK_DEBUG_DIR"
+DEBUG_ARCHIVE_PATH = "/tmp/agencity-debug-export.tgz"
+DEBUG_STAGE_DIR = "/tmp/agencity-debug-stage"
+DEBUG_ARCHIVE_MAX_BYTES = 256 * 1024 * 1024
+DEBUG_EXPORT_SCRIPT = """
+set -eu
+workspace=$1
+state_dir=$2
+artifacts_dir=$3
+profile_path=$4
+stage=$5
+archive=$6
+rm -rf "$stage" "$archive"
+mkdir -p "$stage/workspace/.agencity" "$stage/state" "$stage/artifacts"
+if [ ! -f "$workspace/.agencity/workspace-id" ]; then
+  echo "debug export missing workspace-id" >&2
+  exit 1
+fi
+cp "$workspace/.agencity/workspace-id" "$stage/workspace/.agencity/workspace-id"
+if [ -d "$state_dir" ]; then
+  find "$state_dir" -mindepth 1 -maxdepth 1 -exec cp -a {} "$stage/state/" \\;
+fi
+if [ -d "$artifacts_dir" ]; then
+  find "$artifacts_dir" -mindepth 1 -maxdepth 1 -exec cp -a {} "$stage/artifacts/" \\;
+fi
+if [ -f "$profile_path" ]; then
+  cp "$profile_path" "$stage/profile.db"
+fi
+for suffix in -wal -shm; do
+  if [ -f "$profile_path$suffix" ]; then
+    cp "$profile_path$suffix" "$stage/profile.db$suffix"
+  fi
+done
+rm -f "$stage/auth.json" "$stage/state/auth.json"
+rm -rf "$stage/workspace/.agencity/service"
+tar -C "$stage" -czf "$archive" .
+"""
 BUN_LINUX_X64_URL = (
     "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"
 )
@@ -41,6 +83,7 @@ class AgencityHarnessConfig(vf.HarnessConfig):
     installation: Literal["apt-git", "portable"] = "apt-git"
     bun_url: str = BUN_LINUX_X64_URL
     bun_sha256: str = BUN_LINUX_X64_SHA256
+    debug: bool = False
 
 
 class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
@@ -184,6 +227,17 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
             secret,
         )
         workspace = _workspace(data, self.config.installation)
+        if self.config.debug:
+            metadata = trace.info.setdefault("agencity", {})
+            if not isinstance(metadata, dict):
+                raise ValueError("Agencity trace metadata is malformed")
+            metadata.update(
+                {
+                    "debug": True,
+                    "debug_source_repo": self.config.source_repo,
+                    "debug_source_ref": self.config.source_ref,
+                }
+            )
         if self.config.installation == "portable":
             await _prepare_portable_workspace(runtime, workspace)
         else:
@@ -238,7 +292,11 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
                 f"{diagnostics['parse_error']['message']}"
             ) from error
         if self.config.installation == "portable":
-            trace.info["agencity"] = _trace_result(result)
+            existing = trace.info.get("agencity")
+            trace.info["agencity"] = {
+                **(existing if isinstance(existing, dict) else {}),
+                **_trace_result(result),
+            }
         else:
             await runtime.write(
                 RESULT_PATH,
@@ -263,6 +321,8 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
         if not isinstance(metadata, dict) or metadata.get("cleanup") is not None:
             return
         workspace = _workspace(trace.task.data, "portable")
+        if self.config.debug:
+            metadata["debug"] = True
         try:
             metadata["service_shutdown"] = await _shutdown_portable(
                 runtime,
@@ -272,7 +332,18 @@ class AgencityHarness(vf.Harness[AgencityHarnessConfig]):
         except Exception:
             metadata["service_shutdown"] = "unconfirmed"
             metadata["cleanup"] = "retained-after-unconfirmed-shutdown"
+            if self.config.debug:
+                metadata["debug_export"] = "skipped-unconfirmed-shutdown"
             raise
+        if self.config.debug:
+            await _export_debug_inspection(
+                runtime,
+                workspace,
+                trace,
+                metadata,
+                source_repo=self.config.source_repo,
+                source_ref=self.config.source_ref,
+            )
         try:
             metadata["cleanup"] = await _cleanup_portable(runtime, workspace)
         except Exception:
@@ -518,6 +589,144 @@ async def _prepare_portable_workspace(runtime: vf.Runtime, workspace: str) -> No
             "pre-existing .agencity metadata"
         )
     await runtime.write(PORTABLE_GIT_EXCLUDES_PATH, b".agencity/\n")
+
+
+def _debug_export_command(workspace: str) -> list[str]:
+    return [
+        "sh",
+        "-c",
+        DEBUG_EXPORT_SCRIPT,
+        "agencity-debug-export",
+        workspace,
+        PORTABLE_STATE_DIR,
+        PORTABLE_ARTIFACTS_DIR,
+        PORTABLE_PROFILE_PATH,
+        DEBUG_STAGE_DIR,
+        DEBUG_ARCHIVE_PATH,
+    ]
+
+
+def _debug_export_destination(trace: vf.Trace) -> Path:
+    root = os.environ.get(DEBUG_EXPORT_ENV)
+    if root:
+        destination = Path(root) / str(trace.id)
+    else:
+        destination = Path(tempfile.mkdtemp(prefix="agencity-debug-")) / str(trace.id)
+    destination.mkdir(parents=True, exist_ok=True)
+    return destination
+
+
+def _safe_debug_members(bundle: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    members: list[tarfile.TarInfo] = []
+    for member in bundle.getmembers():
+        name = member.name.replace("\\", "/").lstrip("./")
+        if (
+            name == "auth.json"
+            or name.endswith("/auth.json")
+            or name.endswith(".agencity/service/manifest.json")
+            or "/.agencity/service/" in f"/{name}/"
+        ):
+            continue
+        members.append(member)
+    return members
+
+
+def _write_debug_provenance(
+    destination: Path,
+    trace: vf.Trace,
+    workspace: str,
+    *,
+    source_repo: str,
+    source_ref: str,
+) -> dict[str, Any]:
+    task = getattr(trace, "task", None)
+    task_id = getattr(task, "id", None) if task is not None else None
+    provenance = {
+        "schema": "agencity.benchmark-debug.v1",
+        "label": "debug-preserved",
+        "trace_id": str(getattr(trace, "id", "")),
+        "task_id": task_id if isinstance(task_id, str) else None,
+        "source_repo": source_repo,
+        "source_ref": source_ref,
+        "workspace_root": str(destination / "workspace"),
+        "state_dir": str(destination / "state"),
+        "artifacts": str(destination / "artifacts"),
+        "profile": str(destination / "profile.db"),
+        "container_workspace": workspace,
+    }
+    (destination / "provenance.json").write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (destination / "OBSERVE.md").write_text(
+        "\n".join(
+            [
+                "This directory is a debug-preserved inspection copy of a completed",
+                "Agencity benchmark workspace. It is not official scoring evidence.",
+                "",
+                "Start a local managed service, then attach Observe from the Agencity",
+                "checkout. Observe does not start the service itself:",
+                "",
+                "```sh",
+                "bun src/cli.ts status --json \\",
+                f"  --workspace-root {provenance['workspace_root']} \\",
+                f"  --state-dir {provenance['state_dir']} \\",
+                f"  --artifacts {provenance['artifacts']} \\",
+                f"  --profile {provenance['profile']}",
+                "",
+                "bun src/cli.ts observe \\",
+                f"  --workspace-root {provenance['workspace_root']}",
+                "```",
+                "",
+                "Keep this copy local and uncommitted. Delete it when inspection is done.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return provenance
+
+
+async def _export_debug_inspection(
+    runtime: vf.Runtime,
+    workspace: str,
+    trace: vf.Trace,
+    metadata: dict[str, Any],
+    *,
+    source_repo: str,
+    source_ref: str,
+) -> None:
+    try:
+        packed = await runtime.run(_debug_export_command(workspace), {})
+        if packed.exit_code != 0:
+            detail = (packed.stderr or packed.stdout).strip()[-500:]
+            raise RuntimeError(f"debug export staging failed: {detail}")
+        archive = await runtime.read(
+            DEBUG_ARCHIVE_PATH,
+            max_bytes=DEBUG_ARCHIVE_MAX_BYTES,
+        )
+        destination = _debug_export_destination(trace)
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
+            bundle.extractall(
+                destination,
+                members=_safe_debug_members(bundle),
+                filter="data",
+            )
+        provenance = _write_debug_provenance(
+            destination,
+            trace,
+            workspace,
+            source_repo=source_repo,
+            source_ref=source_ref,
+        )
+        metadata["debug_export"] = "exported"
+        metadata["debug_export_path"] = str(destination)
+        metadata["debug_export_workspace"] = provenance["workspace_root"]
+    except Exception as error:
+        metadata["debug_export"] = "failed"
+        metadata["debug_export_error"] = (
+            f"{type(error).__name__}: {error}"
+        )[-500:]
 
 
 async def _cleanup_portable(runtime: vf.Runtime, workspace: str) -> str:

@@ -382,6 +382,135 @@ function item(
   return { kind, id, provenance: itemProvenance, data };
 }
 
+function conversationItems(
+  state: AgentState,
+  snapshotCursor: string,
+): ObserverDetailItemDto[] {
+  const order = eventOrder(state);
+  const entries: Array<ObserverDetailItemDto & { readonly order: number }> = [];
+  for (const message of state.messages) {
+    if (message.role !== "user" && message.role !== "assistant") continue;
+    entries.push({
+      ...item(
+        "conversation",
+        `message:${message.id}`,
+        provenance(snapshotCursor, message.eventId, message.eventCursor),
+        {
+          entryType: "message",
+          role: message.role,
+          content: boundText(message.content, { mode: "head_tail" }),
+          producer: message.producer ?? null,
+          modelCallId: message.modelCallId,
+          mailboxMessageId: message.mailbox?.mailboxMessageId ?? null,
+        },
+      ),
+      order: order.get(message.eventId) ?? -1,
+    });
+  }
+
+  const effectsByCell = new Map<string, Array<(typeof state.effects)[string]>>();
+  for (const effect of Object.values(state.effects)) {
+    if (effect.origin.kind !== "cell") continue;
+    const retained = effectsByCell.get(effect.origin.cellId) ?? [];
+    retained.push(effect);
+    effectsByCell.set(effect.origin.cellId, retained);
+  }
+  for (const effects of effectsByCell.values()) {
+    effects.sort((left, right) =>
+      (order.get(left.eventId) ?? -1) - (order.get(right.eventId) ?? -1) ||
+      left.id.localeCompare(right.id),
+    );
+  }
+
+  for (const run of Object.values(state.agentRuns)) {
+    for (const step of run.steps) {
+      if (!step.action && !step.typedFinish && !step.rejection) continue;
+      const cellId = step.action?.type === "typescript"
+        ? `agent-run-cell-${step.actionId}`
+        : null;
+      const cell = cellId ? state.cells[cellId] : undefined;
+      const cellEffects = cellId ? effectsByCell.get(cellId) ?? [] : [];
+      const retainedEffects = cellEffects.slice(0, 12).map(effect => ({
+        id: effect.id,
+        executor: effect.executor,
+        operation: effect.operation,
+        status: effect.status,
+        output: effect.output === undefined
+          ? null
+          : boundedJsonText(effect.output, OBSERVER_BOUNDS.shortTextBytes * 4),
+        error: effect.error
+          ? boundText(effect.error, { maximumBytes: OBSERVER_BOUNDS.shortTextBytes * 2, mode: "head_tail" })
+          : null,
+      }));
+      const action = step.action;
+      const actionContent = action?.type === "typescript"
+        ? action.code
+        : action?.type === "final"
+          ? action.content
+          : action?.type === "blocked"
+            ? action.reason
+            : action?.type === "failed"
+              ? action.error
+              : step.typedFinish?.message ?? null;
+      entries.push({
+        ...item(
+          "conversation",
+          `action:${run.id}:${step.id}`,
+          provenance(snapshotCursor, step.eventId),
+          {
+            entryType: "action",
+            runId: run.id,
+            stepId: step.id,
+            ordinal: step.ordinal,
+            tool: action?.type === "typescript"
+              ? "bun_console"
+              : action || step.typedFinish
+                ? "finish"
+                : "model_action",
+            actionType: action?.type ?? step.typedFinish?.status ?? "rejected",
+            status: cell?.status ??
+              (step.rejection
+                ? "rejected"
+                : step.typedFinish?.status ??
+                  (action && action.type !== "typescript" && run.status !== "running"
+                    ? run.status
+                    : "accepted")),
+            input: actionContent === null ? null : boundText(actionContent, { mode: "head_tail" }),
+            finishValue: step.typedFinish?.status === "succeeded"
+              ? boundedJsonText(step.typedFinish.value, OBSERVER_BOUNDS.shortTextBytes * 6)
+              : null,
+            rejection: step.rejection ? boundText(step.rejection, { mode: "head_tail" }) : null,
+            cell: cell ? {
+              id: cell.id,
+              status: cell.status,
+              logs: boundText(cell.logs.join("\n"), {
+                maximumBytes: OBSERVER_BOUNDS.shortTextBytes * 6,
+                mode: "head_tail",
+              }),
+              result: cell.result === undefined
+                ? null
+                : boundedJsonText(cell.result, OBSERVER_BOUNDS.shortTextBytes * 6),
+              error: cell.error
+                ? boundText(cell.error, {
+                    maximumBytes: OBSERVER_BOUNDS.shortTextBytes * 4,
+                    mode: "head_tail",
+                  })
+                : null,
+            } : null,
+            effects: retainedEffects,
+            effectsTruncated: cellEffects.length > retainedEffects.length,
+          },
+        ),
+        order: order.get(step.eventId) ?? -1,
+      });
+    }
+  }
+
+  return entries
+    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+    .map(({ order: _order, ...entry }) => entry);
+}
+
 function detailItems(
   snapshot: InternalObserverRouteSnapshot,
   section: ObserverDetailSection,
@@ -390,6 +519,8 @@ function detailItems(
   const cursor = snapshot.cursor;
   if (!state || cursor === null) return [];
   switch (section) {
+    case "conversation":
+      return conversationItems(state, cursor);
     case "identity": {
       const profile = state.agentProfiles[state.activeAgentProfileVersionId];
       const sessionTitle = boundedSessionTitle(resolveSessionTitlePresentation(
@@ -713,6 +844,63 @@ export function deriveObserverDetailPage(
     : allItems;
   const selected: ObserverDetailItemDto[] = [];
   let byteLimit = false;
+  if (section === "conversation") {
+    let nextEnd = options.cursor ? Math.min(offset, all.length) : all.length;
+    const initialEnd = nextEnd;
+    for (let index = initialEnd - 1; index >= 0 && selected.length < limit; index -= 1) {
+      const candidate = [all[index]!, ...selected];
+      const probe = {
+        version: OBSERVER_PROTOCOL,
+        route: snapshot.route,
+        section,
+        snapshotCursor: snapshot.cursor,
+        items: candidate,
+      };
+      if (serializedUtf8Bytes(probe) > OBSERVER_BOUNDS.detailPageBytes - 1_024) {
+        byteLimit = true;
+        if (selected.length === 0) {
+          const oversized = all[index]!;
+          selected.push(item(
+            oversized.kind,
+            oversized.id,
+            oversized.provenance,
+            {
+              omitted: true,
+              reason: "item_exceeded_page_byte_limit",
+              originalItemUtf8Bytes: serializedUtf8Bytes(oversized),
+            },
+          ));
+          nextEnd = index;
+        } else {
+          nextEnd = index + 1;
+        }
+        break;
+      }
+      selected.unshift(all[index]!);
+      nextEnd = index;
+    }
+    const hasMore = nextEnd > 0;
+    const page: ObserverDetailPageDto = {
+      version: OBSERVER_PROTOCOL,
+      route: snapshot.route,
+      section,
+      snapshotCursor: snapshot.cursor,
+      items: selected,
+      pagination: {
+        cursor: options.cursor ?? null,
+        nextCursor: hasMore ? encodePageCursor(section, snapshot.cursor, nextEnd) : null,
+        limit,
+      },
+      truncation: {
+        itemLimit: hasMore && !byteLimit,
+        byteLimit,
+      },
+    };
+    if (serializedUtf8Bytes(page) > OBSERVER_BOUNDS.detailPageBytes) {
+      throw new Error("Observer detail page exceeded its byte bound");
+    }
+    return page;
+  }
   for (let index = offset; index < all.length && selected.length < limit; index += 1) {
     const candidate = [...selected, all[index]!];
     const probe = {

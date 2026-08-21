@@ -180,7 +180,7 @@ Behavior:
 The first interface has three depths:
 
 1. **Overview** — family graph, route activity, task summaries, and live motion.
-2. **Inspect** — lazy bounded pages for the selected node, run, message, cell, effect, task, goal, gate, budget, or artifact reference.
+2. **Inspect** — lazy bounded pages for the selected node, run, message, cell, effect, task, goal, gate, budget, or artifact reference. Conversation is the first and default section for an opened route.
 3. **Events** — exact committed event metadata observed during the current observer process connection.
 
 The overview does not request raw prompts, source code, effect input, effect output, logs, or message bodies. Those values are fetched only when the user opens the corresponding inspector section.
@@ -211,6 +211,7 @@ Live animation is presentational. Retained route states, exact route cursors, an
 
 The observer derives these paged inspector sections from the retained state of one selected route:
 
+- a conversation section, selected by default, with chronological user and assistant messages interleaved with collapsible model actions and bounded cell/effect outcomes;
 - identity, parent, root, branch, model, active profile summary, and session status;
 - active and terminal runs with steps and typed outcomes;
 - model attempts and usage;
@@ -569,7 +570,7 @@ This step is a separately verifiable milestone with its own tests before observe
 - Render the stable family graph with safe native DOM and SVG construction.
 - Add Overview, Inspect, and Events depths.
 - Fetch sensitive detail only after deliberate inspection.
-- Add node, run, model-attempt, cell, effect, task, mailbox, budget, goal, gate, and artifact-metadata inspectors.
+- Add conversation, node, run, model-attempt, cell, effect, task, mailbox, budget, goal, gate, and artifact-metadata inspectors.
 - Add bounded live activity and truthful connection, truncation, incompatibility, and resync state.
 - Add shared-selection behavior for multiple tabs.
 
