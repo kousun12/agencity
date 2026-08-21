@@ -75,6 +75,10 @@
     positions: new Map(),
     graphZoom: 1,
     graphZoomMode: "fit",
+    graphBaseLeft: 0,
+    graphBaseTop: 0,
+    graphPanX: 0,
+    graphPanY: 0,
     inspectorOpen: false,
     activities: [],
     activityBytes: 0,
@@ -485,6 +489,8 @@
     if (generationChanged) {
       state.positions.clear();
       state.graphZoomMode = "fit";
+      state.graphPanX = 0;
+      state.graphPanY = 0;
       state.activities = [];
       state.activityBytes = 0;
       state.progress.clear();
@@ -768,8 +774,9 @@
     view["graph-stage"].style.height = stageHeight + "px";
     view["graph-canvas"].style.width = bounds.width + "px";
     view["graph-canvas"].style.height = bounds.height + "px";
-    view["graph-canvas"].style.left = Math.max(0, (stageWidth - scaledWidth) / 2) + "px";
-    view["graph-canvas"].style.top = Math.max(0, (stageHeight - scaledHeight) / 2) + "px";
+    state.graphBaseLeft = Math.max(0, (stageWidth - scaledWidth) / 2);
+    state.graphBaseTop = Math.max(0, (stageHeight - scaledHeight) / 2);
+    applyGraphPan();
     view["graph-canvas"].style.transform = "scale(" + zoom + ")";
     view["graph-zoom-level"].textContent = Math.round(zoom * 100) + "%";
     view["graph-zoom-out"].disabled = zoom <= GRAPH_MIN_ZOOM;
@@ -791,6 +798,8 @@
 
   function fitGraph() {
     state.graphZoomMode = "fit";
+    state.graphPanX = 0;
+    state.graphPanY = 0;
     renderGraph();
     view["family-graph"].scrollLeft = 0;
     view["family-graph"].scrollTop = 0;
@@ -1482,6 +1491,8 @@
       state.events = [];
       state.eventKeys.clear();
       state.graphZoomMode = "fit";
+      state.graphPanX = 0;
+      state.graphPanY = 0;
       renderActivities();
       renderEvents();
       applySnapshot(data);
@@ -1532,6 +1543,50 @@
     state.layoutTimer = window.setTimeout(renderGraph, 100);
   }
 
+  function applyGraphPan() {
+    view["graph-canvas"].style.left = state.graphBaseLeft + state.graphPanX + "px";
+    view["graph-canvas"].style.top = state.graphBaseTop + state.graphPanY + "px";
+  }
+
+  function bindGraphPanning() {
+    const viewport = view["family-graph"];
+    let activePan = null;
+    viewport.addEventListener("pointerdown", (event) => {
+      if (
+        event.button !== 0 ||
+        activePan ||
+        (event.target instanceof Element && event.target.closest(".route-node"))
+      ) {
+        return;
+      }
+      activePan = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        panX: state.graphPanX,
+        panY: state.graphPanY,
+      };
+      viewport.setPointerCapture(event.pointerId);
+      viewport.classList.add("panning");
+      event.preventDefault();
+    });
+    viewport.addEventListener("pointermove", (event) => {
+      if (!activePan || activePan.pointerId !== event.pointerId) return;
+      state.graphPanX = activePan.panX + event.clientX - activePan.x;
+      state.graphPanY = activePan.panY + event.clientY - activePan.y;
+      applyGraphPan();
+      event.preventDefault();
+    });
+    const finishPan = (event) => {
+      if (!activePan || activePan.pointerId !== event.pointerId) return;
+      if (viewport.hasPointerCapture(event.pointerId)) viewport.releasePointerCapture(event.pointerId);
+      activePan = null;
+      viewport.classList.remove("panning");
+    };
+    viewport.addEventListener("pointerup", finishPan);
+    viewport.addEventListener("pointercancel", finishPan);
+  }
+
   function bindActions() {
     for (const button of document.querySelectorAll("[data-depth]")) {
       button.addEventListener("click", () => {
@@ -1559,6 +1614,7 @@
       event.preventDefault();
       setGraphZoom(state.graphZoom * (event.deltaY < 0 ? GRAPH_ZOOM_FACTOR : 1 / GRAPH_ZOOM_FACTOR));
     }, { passive: false });
+    bindGraphPanning();
     view["inspector-close"].addEventListener("click", closeInspector);
     window.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && state.inspectorOpen) closeInspector();

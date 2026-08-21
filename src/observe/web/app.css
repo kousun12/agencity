@@ -431,12 +431,18 @@ main {
   flex: 1 1 clamp(32rem, 68vh, 52rem);
   min-height: clamp(32rem, 68vh, 52rem);
   overflow: auto;
+  cursor: grab;
+  touch-action: none;
   border: 1px solid #212a38;
   border-radius: 0.6rem;
   background-image:
     linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
   background-size: 24px 24px;
+}
+
+.family-graph.panning {
+  cursor: grabbing;
 }
 
 .graph-stage {

@@ -168,6 +168,18 @@ test("Chromium observes a live family through the foreground CLI", async () => {
     await page.getByRole("button", { name: "Inspect Live Child" }).waitFor();
     expect(await page.locator(".route-node").count()).toBe(2);
     expect(await page.locator(".graph-edge").first().getAttribute("d")).not.toContain("C");
+    const graph = page.locator("#family-graph");
+    const graphBounds = await graph.boundingBox();
+    const canvasBeforePan = await page.locator("#graph-canvas").boundingBox();
+    expect(graphBounds).not.toBeNull();
+    expect(canvasBeforePan).not.toBeNull();
+    await page.mouse.move(graphBounds!.x + 32, graphBounds!.y + 32);
+    await page.mouse.down();
+    await page.mouse.move(graphBounds!.x + 112, graphBounds!.y + 82, { steps: 4 });
+    await page.mouse.up();
+    const canvasAfterPan = await page.locator("#graph-canvas").boundingBox();
+    expect(canvasAfterPan!.x - canvasBeforePan!.x).toBeGreaterThan(70);
+    expect(canvasAfterPan!.y - canvasBeforePan!.y).toBeGreaterThan(40);
     expect(await page.locator("#activity-count").textContent()).toContain("update");
     await waitFor(
       () => fixtureOne.activeStreams === 2,

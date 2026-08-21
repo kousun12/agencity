@@ -131,9 +131,13 @@ describe("observer browser assets", () => {
     expect(html).toContain('id="graph-zoom-in"');
     expect(javascript).toContain("function subtreeSpan");
     expect(javascript).toContain("function fittedGraphZoom");
+    expect(javascript).toContain("function bindGraphPanning");
+    expect(javascript).toContain('setPointerCapture(event.pointerId)');
+    expect(javascript).toContain('event.target.closest(".route-node")');
     expect(javascript).toContain('"A", radius, radius');
     expect(javascript).not.toContain('"Q", middleX');
     expect(javascript).not.toContain('" C "');
+    expect(css).toContain("cursor: grabbing");
     expect(css).toContain("vector-effect: non-scaling-stroke");
   });
 });
