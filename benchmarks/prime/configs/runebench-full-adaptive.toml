@@ -40,7 +40,7 @@ max_retries = 0
 [env.agent.harness]
 id = "agencity-runebench"
 source_repo = "https://github.com/kousun12/agencity.git"
-source_ref = "b96b0acf0403ab29ef53fb1e78213ff211f624ec"
+source_ref = "4afa0c778cbe5fd4302a9528025631ceef2ab02c"
 installation = "portable"
 bun_url = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"
 bun_sha256 = "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
