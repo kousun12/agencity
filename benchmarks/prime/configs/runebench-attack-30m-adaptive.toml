@@ -18,7 +18,7 @@ max_tokens = 128000
 [env.taskset]
 id = "agencity-runebench"
 dataset = "maxbittker/runebench@sha256:4bb3430af2ef3a320bd3dfeeab2447fbf9e0093452ad747997186a85a060de28"
-treatment = "agencity-runebench-repl-v2"
+treatment = "agencity-runebench-repl-v1"
 learning_mode = "within-run"
 ignore_timeouts = false
 ignore_dockerfile = true

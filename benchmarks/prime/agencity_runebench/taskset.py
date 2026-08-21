@@ -33,7 +33,7 @@ DATASET = (
     "maxbittker/runebench@"
     "sha256:4bb3430af2ef3a320bd3dfeeab2447fbf9e0093452ad747997186a85a060de28"
 )
-TREATMENT = "agencity-runebench-repl-v2"
+TREATMENT = "agencity-runebench-repl-v1"
 SOURCE_CATALOG_PATH = (
     Path(__file__).resolve().parent.parent / "manifests" / "runebench-catalog.json"
 )
@@ -925,7 +925,7 @@ class RuneBenchConfig(HarborSuiteConfig):
     dataset: Literal[
         "maxbittker/runebench@sha256:4bb3430af2ef3a320bd3dfeeab2447fbf9e0093452ad747997186a85a060de28"
     ] = DATASET
-    treatment: Literal["agencity-runebench-repl-v2"] = TREATMENT
+    treatment: Literal["agencity-runebench-repl-v1"] = TREATMENT
     learning_mode: LearningMode = "within-run"
     ignore_dockerfile: Literal[True] = True
     require_image: Literal[False] = False

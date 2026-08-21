@@ -293,7 +293,7 @@ concurrency, and reports an unavailable probe as unavailable; passing memory
 does not prove CPU, provider quota, cleanup, or scoring health. Verifiers episode concurrency may
 parallelize the 16-task selection only when host memory, CPU, provider quota,
 cleanup, and scoring remain healthy. The
-`agencity-runebench-repl-v2` treatment imports the image-owned TypeScript SDK
+`agencity-runebench-repl-v1` treatment imports the image-owned TypeScript SDK
 directly in Agencity's persistent Bun console instead of advertising generic
 MCP support. Ordinary domain fields such as RuneBench's local
 `password: "test"` connection option are valid model-generated TypeScript; only
@@ -356,7 +356,7 @@ and next hypotheses. A strategy retires after repeated zero progress, stalled of
 peak, or excessive action failures unless a named assumption changes. Long
 execution remains bounded by authoritative remaining time and reserves the
 final gate window for tracker verification and typed completion.
-This version-2 treatment has model-free prompt and configuration coverage; all
+This prompt revision has model-free prompt and configuration coverage; all
 recorded paid RuneBench results predate it.
 A later
 Luna-xhigh Attack 30-minute

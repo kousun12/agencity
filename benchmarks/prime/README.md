@@ -139,7 +139,7 @@ Catalog: [`manifests/runebench-catalog.json`](./manifests/runebench-catalog.json
 - immutable game image:
   `ghcr.io/maxbittker/rs-agent-benchmark@sha256:0961663ac1dc23d6cd00b88e79ff106cb1f0c7b7340659a914f96a8454124016`.
 
-The `agencity-runebench-repl-v2` treatment replaces the task prompt's MCP
+The `agencity-runebench-repl-v1` treatment replaces the task prompt's MCP
 wrapper with one staged controller around the same image-owned TypeScript SDK
 inside Agencity's persistent Bun console. A process-identity claim permits one
 control owner, release confirms disconnection before trainer handoff, repeated
@@ -158,8 +158,8 @@ whose progress would materially stop during provider calls.
 The model begins with discovery, records an initial plan and strategy before
 acting, and returns to focused documentation or live-state discovery whenever
 new evidence creates a specific question. Plans are hypotheses: evidence-driven
-strategy changes and their reasons remain in `runebench.progress`. Version 2
-has model-free coverage; recorded paid RuneBench results predate it.
+strategy changes and their reasons remain in `runebench.progress`. This prompt
+revision has model-free coverage; recorded paid RuneBench results predate it.
 The treatment guidance is not duplicated in the task prompt. The active
 tracker path is supplied explicitly. Successful `finish` is gate-checked
 against positive scored-skill XP and a tracker sample near the official

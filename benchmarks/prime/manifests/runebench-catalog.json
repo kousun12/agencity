@@ -811,7 +811,7 @@
   ],
   "tasks_sha256": "c314ab56a6d0f325e0c908620eaea0bbd71353238b3fb4308e7b3cb47591ab5a",
   "treatments": {
-    "agencity-runebench-repl-v2": {
+    "agencity-runebench-repl-v1": {
       "bun_archive": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip",
       "bun_archive_sha256": "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f",
       "bun_version": "1.3.14",

@@ -56,7 +56,6 @@ class RuneBenchCatalogTests(unittest.TestCase):
         treatment = catalog["treatments"][TREATMENT]
         self.assertEqual(treatment["source_memory_gb"], 4)
         self.assertEqual(treatment["treatment_memory_gb"], 8)
-        self.assertNotIn("agencity-runebench-repl-v1", catalog["treatments"])
         for task in catalog["tasks"]:
             self.assertTrue(task["image"].endswith(task["image_manifest_digest"]))
             self.assertEqual(task["workdir"], "/app")

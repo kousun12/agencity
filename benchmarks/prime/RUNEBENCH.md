@@ -118,7 +118,7 @@ before relinquishing ownership. The local `password: "test"` option remains
 ordinary benchmark configuration; only exact credential values registered by
 Agencity are rejected or redacted. No MCP process or protocol is involved.
 
-This adaptation is named `agencity-runebench-repl-v2`. It preserves the
+This adaptation is named `agencity-runebench-repl-v1`. It preserves the
 official task package, initial save, game image, time horizon, 15-second sample
 cadence, and Harbor verifier. It changes the agent-to-SDK interface, stages
 explicit console guidance in the root `AGENTS.md`, and raises the runtime
@@ -130,11 +130,11 @@ and ordinary product runs retain the 512 MiB default. The adapted task removes
 the unavailable MCP instructions and corrects the tracker command without
 duplicating the root treatment guidance. The catalog and task trace retain
 both memory values and both the original and adapted prompt digests.
-Version 2 replaces version 1's single-discovery-cell prescription with an
-initial discovery phase, a required initial plan and strategy before game
-actions, and focused discovery plus evidence-driven strategy revision
-throughout the run. Paid results recorded below predate version 2; the current
-version has model-free prompt and configuration coverage only.
+The current guidance uses an initial discovery phase, requires an initial plan
+and strategy before game actions, and permits focused discovery plus
+evidence-driven strategy revision throughout the run. Paid results recorded
+below predate this prompt revision, which has model-free prompt and
+configuration coverage only.
 
 The game starts after the pinned Agencity source and Bun runtime are installed.
 This prevents harness provisioning time from consuming the game horizon. The

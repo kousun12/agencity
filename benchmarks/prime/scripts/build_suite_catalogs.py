@@ -426,7 +426,7 @@ def runebench_catalog() -> dict[str, Any]:
     if len(expected_ids) != 32:
         raise ValueError(f"RuneBench dataset has {len(expected_ids)} tasks, expected 32")
     treatment = {
-        "agencity-runebench-repl-v2": {
+        "agencity-runebench-repl-v1": {
             "harness": "agencity-runebench",
             "source_repo": AGENCITY_SOURCE_REPO,
             "source_ref": AGENCITY_SOURCE_REF,
