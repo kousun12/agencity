@@ -104,6 +104,12 @@ h3 {
   flex: 0 0 auto;
 }
 
+.surface-note {
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
 .connection-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(6rem, 1fr));
@@ -140,8 +146,7 @@ h3 {
   font-size: 0.75rem;
 }
 
-.connection-details summary,
-.trust-notice summary {
+.connection-details summary {
   cursor: pointer;
 }
 
@@ -180,42 +185,6 @@ h3 {
 [data-state="service_incompatible"],
 [data-state="route_unavailable"] {
   color: var(--bad);
-}
-
-.trust-notice {
-  padding: 0.52rem clamp(1rem, 3vw, 2.5rem);
-  border-bottom: 1px solid #3f3520;
-  background: #221d12;
-  color: #e8d7aa;
-  font-size: 0.78rem;
-}
-
-.trust-notice summary {
-  display: flex;
-  gap: 0.65rem;
-  align-items: center;
-  list-style: none;
-}
-
-.trust-notice summary::-webkit-details-marker {
-  display: none;
-}
-
-.trust-notice summary::after {
-  margin-left: auto;
-  color: #bba976;
-  content: "Details";
-}
-
-.trust-notice[open] summary::after {
-  content: "Hide";
-}
-
-.trust-notice p {
-  max-width: 72rem;
-  margin: 0.55rem 0 0;
-  color: #d5c79f;
-  line-height: 1.5;
 }
 
 .app-status {
@@ -754,10 +723,6 @@ main {
 @media (max-width: 560px) {
   .connection-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .trust-notice summary span {
-    display: none;
   }
 
   .work-metrics {

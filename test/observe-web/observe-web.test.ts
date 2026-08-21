@@ -141,7 +141,7 @@ test("Chromium observes a live family through the foreground CLI", async () => {
     await page.getByRole("button", { name: "Inspect Root Alpha" }).waitFor();
     expect(await page.locator("#current-work-title").textContent()).toBe("Root Alpha");
     expect(await page.locator(".connection-details").evaluate(element => element.hasAttribute("open"))).toBe(false);
-    expect(await page.locator(".trust-notice").evaluate(element => element.hasAttribute("open"))).toBe(false);
+    expect(await page.locator(".surface-note").textContent()).toBe("Local observer · Read-only view");
     expect(await page.locator(".route-node").count()).toBe(1);
     expect(await page.locator("#family-graph").evaluate(element =>
       element.scrollWidth <= element.clientWidth + 1

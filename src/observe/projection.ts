@@ -178,7 +178,7 @@ export function deriveObserverFamilyOverview(
   family: InternalObserverFamily,
 ): ObserverFamilyOverviewDto {
   const edgeByChild = new Map(family.edges.map((edge) => [observerRouteKey(edge.child), edge]));
-  const nodes = [...family.routes.values()].map((snapshot) => {
+  let nodes: ObserverFamilyOverviewDto["nodes"][number][] = [...family.routes.values()].map((snapshot) => {
     const state = snapshot.state;
     const edge = edgeByChild.get(observerRouteKey(snapshot.route));
     const parentState = edge ? family.routes.get(observerRouteKey(edge.parent))?.state : null;
@@ -216,8 +216,9 @@ export function deriveObserverFamilyOverview(
         task: boundText(run.task, { maximumBytes: OBSERVER_BOUNDS.shortTextBytes }),
         status: run.status,
         stepCount: run.steps.length,
-        currentAction: latestStep?.action?.type ??
-          (["queued", "running"].includes(run.status) ? "awaiting_model" as const : null),
+        currentAction: ["queued", "running"].includes(run.status)
+          ? latestStep?.action?.type ?? "awaiting_model" as const
+          : null,
         reason: run.reason
           ? boundText(run.reason, { maximumBytes: OBSERVER_BOUNDS.shortTextBytes })
           : null,
@@ -282,6 +283,33 @@ export function deriveObserverFamilyOverview(
       delegationEdges = delegationEdges.slice(0, -1);
       graphEdgesTruncated = true;
     }
+  }
+  if (serializedUtf8Bytes(build()) > OBSERVER_BOUNDS.familySnapshotBytes) {
+    byteLimit = true;
+    nodes = nodes.map((node) => ({
+      ...node,
+      taskSummary: null,
+      latestRun: node.latestRun ? {
+        ...node.latestRun,
+        task: null,
+        reason: null,
+      } : null,
+    }));
+  }
+  if (serializedUtf8Bytes(build()) > OBSERVER_BOUNDS.familySnapshotBytes) {
+    nodes = nodes.map((node) => ({
+      ...node,
+      sessionName: null,
+      branchName: null,
+      model: null,
+    }));
+  }
+  if (serializedUtf8Bytes(build()) > OBSERVER_BOUNDS.familySnapshotBytes) {
+    nodes = nodes.map((node) => ({
+      ...node,
+      latestRun: null,
+      budget: null,
+    }));
   }
   return build();
 }

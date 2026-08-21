@@ -90,7 +90,7 @@ export interface ObserverFamilyNodeDto {
   readonly activityReason: ObserverRouteActivityReason;
   readonly latestRun: {
     readonly id: string;
-    readonly task: ObserverBoundedText;
+    readonly task: ObserverBoundedText | null;
     readonly status: AgentRunState["status"];
     readonly stepCount: number;
     readonly currentAction: "typescript" | "final" | "blocked" | "failed" | "awaiting_model" | null;

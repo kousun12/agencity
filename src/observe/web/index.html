@@ -13,6 +13,7 @@
       <div class="brand-block">
         <p class="eyebrow">Agencity</p>
         <h1>Observe</h1>
+        <p class="surface-note">Local observer · Read-only view</p>
       </div>
       <dl class="connection-summary" aria-label="Observer connection summary">
         <div>
@@ -46,14 +47,6 @@
         </dl>
       </details>
     </header>
-
-    <details class="trust-notice">
-      <summary>
-        <strong>Trusted local · Read-only</strong>
-        <span>Sensitive agent and repository data may appear here.</span>
-      </summary>
-      <p><strong>Trusted local observer.</strong> Agent tasks, model output, logs, and repository data can be sensitive. This page is read-only but is not a security sandbox. While a browser is attached, observation streams can defer managed-service quiescence.</p>
-    </details>
 
     <p id="app-status" class="app-status" role="status" aria-live="polite">Starting observer session…</p>
 
@@ -93,7 +86,7 @@
             <div><dt>Steps</dt><dd id="current-work-steps">0</dd></div>
             <div><dt>Turns</dt><dd id="current-work-turns">0</dd></div>
             <div><dt>Tokens</dt><dd id="current-work-tokens">0</dd></div>
-            <div><dt>Elapsed</dt><dd id="current-work-elapsed">0s</dd></div>
+            <div><dt>Wall time</dt><dd id="current-work-elapsed">0s</dd></div>
           </dl>
           <p id="current-work-note" class="state-note"></p>
         </section>

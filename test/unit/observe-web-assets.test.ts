@@ -94,12 +94,11 @@ describe("observer browser assets", () => {
     expect(javascript).toContain("DETAIL_SECTIONS.some");
   });
 
-  test("renders trusted-local and data-sensitivity guidance", async () => {
+  test("keeps local read-only authority visible without a callout", async () => {
     const html = await readAsset("index.html");
-    expect(html).toContain("Trusted local observer.");
-    expect(html).toContain("can be sensitive");
-    expect(html).toContain("not a security sandbox");
-    expect(html).toContain("observation streams can defer managed-service quiescence");
+    expect(html).toContain("Local observer · Read-only view");
+    expect(html).not.toContain('class="trust-notice"');
+    expect(html).not.toContain("Sensitive agent and repository data may appear here.");
   });
 
   test("prioritizes current work and keeps route detail in context", async () => {
