@@ -17,6 +17,7 @@ import type { ModelSelectionInput } from "./model-selection.ts";
 
 export const MAX_AGENT_INVOCATION_BATCH_SIZE = 16;
 export const MAX_AGENT_INVOCATION_WAIT_MS = 86_400_000;
+const RUN_ADVANCE_RETRY_DELAYS_MS = [50, 250, 1_000, 5_000, 15_000] as const;
 
 export interface SpawnAgentInput {
   readonly task: string;
@@ -131,6 +132,7 @@ export class AgentService {
   readonly #admissions = new AdmissionQueue();
   readonly #deliveries = new AdmissionQueue();
   readonly #targetDispatch = new AdmissionQueue();
+  readonly #scheduledRunAdvances = new Set<string>();
   #runs: AgentRunService | null = null;
   readonly maxMessageBytes = 32 * 1024;
   readonly maxPendingMessages = 100;
@@ -1029,9 +1031,46 @@ export class AgentService {
   }
 
   #scheduleSpawnAdvance(handle: SubagentHandle): void {
-    if (!this.#runs) return;
+    this.#scheduleRunAdvance(
+      handle.sessionId,
+      handle.branchId,
+      spawnRunId(handle.taskId),
+    );
+  }
+
+  #scheduleRunAdvance(
+    sessionId: string,
+    branchId: string,
+    runId: string,
+  ): void {
     const runs = this.#runs;
-    queueMicrotask(() => { void runs.advance(handle.sessionId, handle.branchId, spawnRunId(handle.taskId)).catch(() => {}); });
+    if (!runs) return;
+    const key = `${sessionId}/${branchId}/${runId}`;
+    if (this.#scheduledRunAdvances.has(key)) return;
+    this.#scheduledRunAdvances.add(key);
+    queueMicrotask(() => {
+      void this.#advanceRunWithRetry(runs, sessionId, branchId, runId)
+        .finally(() => this.#scheduledRunAdvances.delete(key));
+    });
+  }
+
+  async #advanceRunWithRetry(
+    runs: AgentRunService,
+    sessionId: string,
+    branchId: string,
+    runId: string,
+  ): Promise<void> {
+    for (let attempt = 0; attempt <= RUN_ADVANCE_RETRY_DELAYS_MS.length; attempt++) {
+      if (attempt > 0) {
+        await runAdvanceRetryDelay(RUN_ADVANCE_RETRY_DELAYS_MS[attempt - 1]!);
+      }
+      try {
+        await runs.advance(sessionId, branchId, runId);
+        return;
+      } catch {
+        if (attempt === RUN_ADVANCE_RETRY_DELAYS_MS.length) return;
+      }
+    }
   }
 
   async result(
@@ -1313,9 +1352,7 @@ export class AgentService {
   }
 
   #scheduleQueuedRunAdvance(message: MailboxRecord, runId: string): void {
-    if (!this.#runs) return;
-    const runs = this.#runs;
-    queueMicrotask(() => { void runs.advance(message.toSessionId, message.toBranchId, runId).catch(() => {}); });
+    this.#scheduleRunAdvance(message.toSessionId, message.toBranchId, runId);
   }
 
   async #resolveFamilyTarget(source: SessionRecord, rawTarget: string): Promise<{ session: SessionRecord; branchId: string; relationship: FamilyRelationship }> {
@@ -1797,6 +1834,13 @@ function decodeMessageCursor(cursor: string): { sentAt: string; id: string } {
     if (typeof value.sentAt !== "string" || !Number.isFinite(Date.parse(value.sentAt)) || typeof value.id !== "string" || !value.id) throw new Error();
     return { sentAt: value.sentAt, id: value.id };
   } catch { throw new ValidationError("Invalid family message pagination cursor"); }
+}
+
+function runAdvanceRetryDelay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, milliseconds);
+    timer.unref?.();
+  });
 }
 
 function spawnRunId(taskId: string): string { return `agent-spawn-run-${stableId(taskId)}`; }

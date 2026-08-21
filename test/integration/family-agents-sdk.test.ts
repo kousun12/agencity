@@ -554,6 +554,53 @@ describe("FU-012 retained family messaging", () => {
     }
   });
 
+  test("detached child admission retries a transient in-process advance failure", async () => {
+    const value = await fixture([
+      action({ type: "final", content: "recovered child result" }),
+    ]);
+    const originalAdvance = value.supervisor.runs.advance.bind(
+      value.supervisor.runs,
+    );
+    let attempts = 0;
+    (value.supervisor.runs as any).advance = async (
+      sessionId: string,
+      branchId: string,
+      runId: string,
+    ) => {
+      attempts++;
+      if (attempts === 1) throw new Error("transient advance failure");
+      return originalAdvance(sessionId, branchId, runId);
+    };
+    try {
+      const spawned = await value.supervisor.executeCell(
+        value.root.sessionId,
+        value.root.branchId,
+        `return sdk.agents.spawn({
+          name: "Recovery Worker",
+          task: "Complete after one transient scheduler failure",
+          idempotencyKey: "retry-transient-advance",
+        });`,
+      );
+      const handle = spawned.result as any;
+      const completed = await waitFor(async () => {
+        const task = (await value.supervisor.agents.listTasks(
+          value.root.sessionId,
+          value.root.branchId,
+        )).find((candidate) => candidate.taskId === handle.taskId);
+        return task?.status === "completed" ? task : undefined;
+      }, 5_000);
+      expect(completed.status).toBe("completed");
+      expect(attempts).toBeGreaterThanOrEqual(2);
+      expect((await value.supervisor.agents.listTasks(
+        value.root.sessionId,
+        value.root.branchId,
+      )).filter((task) => task.taskId === handle.taskId)).toHaveLength(1);
+    } finally {
+      (value.supervisor.runs as any).advance = originalAdvance;
+      await value.supervisor.close();
+    }
+  });
+
   test("sdk.agents run, runMany, spawn, and result retain task result references and notices", async () => {
     const value = await fixture([
       action({ type: "final", content: "single result" }),
