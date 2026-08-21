@@ -237,11 +237,13 @@ Cancellation is best effort: an abort signal can stop an in-process executor, bu
 
 An autonomous provider step places its durable context projection before
 volatile step ordinal, deadline, trajectory, and exact-once observations inside
-the final run-step message. This preserves a longer unchanged provider-cache
-prefix without dropping facts or weakening exact candidate retention and
-recovery. Active working values remain part of that durable projection, so a
-small replaceable checkpoint can preserve important progress after its original
-cell leaves the bounded recent trajectory.
+the final run-step message. Within that projection, stable runtime, profile,
+goal, task, harness, message, and query guidance precedes mutable budget,
+active-run, and working-state fields. This preserves a longer unchanged
+provider-cache prefix without dropping facts or weakening exact candidate
+retention and recovery. Active working values remain part of that durable
+projection, so a small replaceable checkpoint can preserve important progress
+after its original cell leaves the bounded recent trajectory.
 
 The document service imports ordered chunks and creates exact input sets; agent and recursive-model services delegate those references through normal child sessions. Relational memory and refinement are implemented through canonical harness events, rebuildable projections, and a disposable FTS5 candidate index. `HttpMemoryCandidateIndex` provides the same candidate-generation boundary over capability-negotiated HTTP. Local and HTTP candidate-index adapters return stable entry/version IDs and ranks only; authoritative scope, status, policy, conflict, and exposure filtering remains in the runtime and is recorded in context provenance.
 

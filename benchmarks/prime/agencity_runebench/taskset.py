@@ -104,7 +104,14 @@ export type ActionResult = {
 
 export type ActionAttempt<T> =
   | { ok: true; attempt: number; result: T }
-  | { ok: false; attempt: number; failureCount: number; result?: T; error?: string };
+  | {
+      ok: false;
+      attempt: number;
+      failureCount: number;
+      kind: "reported_failure" | "invalid_result" | "threw";
+      result?: T;
+      error?: string;
+    };
 
 export type ActionLoopOptions<T> = {
   action: () => Promise<T>;
@@ -113,6 +120,7 @@ export type ActionLoopOptions<T> = {
   minBackoffMs?: number;
   maxBackoffMs?: number;
   successDelayMs?: number;
+  maxConsecutiveFailures?: number;
 };
 
 export type MeasuredActionLoopOptions<T> = ActionLoopOptions<T> & {
@@ -120,9 +128,16 @@ export type MeasuredActionLoopOptions<T> = ActionLoopOptions<T> & {
 };
 
 export type MeasuredActionLoopSummary = {
+  requested: number;
   attempted: number;
+  accepted: number;
   succeeded: number;
   failed: number;
+  reportedFailures: number;
+  invalidResults: number;
+  threw: number;
+  failureRate: number;
+  stopReason: "iterations_completed" | "consecutive_failures";
   elapsedMs: number;
   metric: {
     before: number;
@@ -131,6 +146,7 @@ export type MeasuredActionLoopSummary = {
   };
   lastFailure: {
     attempt: number;
+    kind: "reported_failure" | "invalid_result" | "threw";
     error: string | null;
     message: string | null;
     reason: string | null;
@@ -334,27 +350,45 @@ export async function runActionLoop<T extends ActionResult>(
     MAX_BACKOFF_MS,
     "successDelayMs",
   );
+  const maxConsecutiveFailures = boundedInteger(
+    options.maxConsecutiveFailures,
+    8,
+    1,
+    1_000,
+    "maxConsecutiveFailures",
+  );
   const attempts: ActionAttempt<T>[] = [];
   let failureCount = 0;
 
   for (let attempt = 1; attempt <= iterations; attempt += 1) {
     try {
       const result = await options.action();
-      if (result?.success === false) {
+      if (result?.success !== true) {
         failureCount += 1;
+        const kind = result?.success === false
+          ? "reported_failure" as const
+          : "invalid_result" as const;
         const failed: ActionAttempt<T> = {
           ok: false,
           attempt,
           failureCount,
-          result,
+          kind,
+          ...(result === undefined ? {} : { result }),
+          ...(kind === "invalid_result"
+            ? {
+                error:
+                  "ACTION_RESULT_INVALID: expected an object with boolean success",
+              }
+            : {}),
         };
         attempts.push(failed);
         await options.onAttempt?.(failed);
+        if (failureCount >= maxConsecutiveFailures) break;
         const delay = Math.min(
           maxBackoffMs,
           minBackoffMs * (2 ** Math.min(failureCount - 1, 8)),
         );
-        await Bun.sleep(delay);
+        if (attempt < iterations) await Bun.sleep(delay);
         continue;
       }
       failureCount = 0;
@@ -368,15 +402,17 @@ export async function runActionLoop<T extends ActionResult>(
         ok: false,
         attempt,
         failureCount,
+        kind: "threw",
         error: error instanceof Error ? error.message : String(error),
       };
       attempts.push(failed);
       await options.onAttempt?.(failed);
+      if (failureCount >= maxConsecutiveFailures) break;
       const delay = Math.min(
         maxBackoffMs,
         minBackoffMs * (2 ** Math.min(failureCount - 1, 8)),
       );
-      await Bun.sleep(delay);
+      if (attempt < iterations) await Bun.sleep(delay);
     }
   }
   return attempts;
@@ -400,19 +436,34 @@ export async function runMeasuredActionLoop<T extends ActionResult>(
   const attempts = await runActionLoop(options);
   const after = await measuredValue(options.measure);
   const failed = attempts.filter((attempt) => !attempt.ok);
+  const reportedFailures = failed.filter((attempt) =>
+    attempt.kind === "reported_failure").length;
+  const invalidResults = failed.filter((attempt) =>
+    attempt.kind === "invalid_result").length;
+  const threw = failed.filter((attempt) => attempt.kind === "threw").length;
   const lastFailure = failed.at(-1);
   const result = lastFailure && "result" in lastFailure
     ? lastFailure.result
     : undefined;
   return {
+    requested: options.iterations,
     attempted: attempts.length,
+    accepted: attempts.length - failed.length,
     succeeded: attempts.length - failed.length,
     failed: failed.length,
+    reportedFailures,
+    invalidResults,
+    threw,
+    failureRate: attempts.length === 0 ? 0 : failed.length / attempts.length,
+    stopReason: attempts.length < options.iterations
+      ? "consecutive_failures"
+      : "iterations_completed",
     elapsedMs: Date.now() - startedAt,
     metric: { before, after, delta: after - before },
     lastFailure: lastFailure
       ? {
           attempt: lastFailure.attempt,
+          kind: lastFailure.kind,
           error: "error" in lastFailure ? lastFailure.error ?? null : null,
           message: typeof result?.message === "string" ? result.message : null,
           reason: typeof result?.reason === "string" ? result.reason : null,
@@ -464,6 +515,11 @@ rs.findNearbyLoc(/tree/i);
 These examples identify the receiver and call shape; select the action relevant
 to the scored skill. The full image-owned API remains authoritative. Read a
 bounded section with `tools.readFile("/app/sdk/API.md", {{ startLine, endLine }})`.
+For a `BotActions` parameter implemented as a name or regular-expression
+matcher, pass the string or `RegExp` selector rather than a previously resolved
+inventory, NPC, or location object. A `regex.test is not a function` error is
+evidence of the wrong overload shape; correct the argument once instead of
+repeating the call or moving it to `rs`.
 To locate a symbol first, inspect the exact bounded shell envelope:
 
 ```ts
@@ -471,30 +527,42 @@ const match = await tools.shell("grep -n 'attackNpc' /app/sdk/API.md");
 return match.completeness === "inline" ? match.value : match;
 ```
 
-## Image-owned knowledge
+## Image-owned API and knowledge
 
-The pinned image provides two complementary model-facing knowledge sources:
+The pinned image provides three different sources. Keep their roles and
+directories separate:
 
-- `/app/learnings/` contains upstream `rs-sdk` operational notes, tested
-  interaction patterns, known obstacles, and skill examples. These files are
-  intended for agent use. Check for a relevant filename early instead of
-  rediscovering a documented game or SDK behavior.
-- `/app/wiki/` contains broad extracted game knowledge. Start in
-  `/app/wiki/skills/` with the scored skill's Markdown file for training
-  methods and requirements, then
-  follow its Markdown links or search the focused directories:
-  `/app/wiki/items/` for tools and ingredients, `/app/wiki/npcs/` for targets
-  and locations, `/app/wiki/shops/` for stock and prices, and
-  `/app/wiki/quests/` for access requirements and walkthroughs.
+- `/app/sdk/API.md` is the executable API contract. Use it to confirm the exact
+  receiver, method name, argument shape, and return type. `BotSDK` methods
+  belong on `rs`; `BotActions` methods belong on `bot`.
+- `/app/learnings/` contains optional upstream `rs-sdk` operational notes,
+  tested interaction patterns, known obstacles, and examples. A scored skill
+  may have no matching learning file. Upstream prose may call the game client
+  `sdk`; in this treatment, Agencity owns the `sdk` name. Translate each game
+  call through `/app/sdk/API.md` to `rs` or `bot` instead of copying receiver
+  names blindly.
+- `/app/wiki/` contains game facts, not callable API. Start in
+  `/app/wiki/skills/` for training methods and requirements, then follow its
+  Markdown links or search `/app/wiki/items/` for tools and ingredients,
+  `/app/wiki/npcs/` for targets and locations, `/app/wiki/shops/` for stock and
+  prices, and `/app/wiki/quests/` for access requirements and walkthroughs.
 
-List likely files once with a bounded shell call, then read only the relevant
-pages:
+List learnings and skill guides separately so a wiki filename is never treated
+as a learning filename:
 
 ```ts
-const files = await tools.shell(
-  "ls -1 /app/learnings /app/wiki/skills",
-);
-return files.completeness === "inline" ? files.value : files;
+const [learningFiles, skillFiles] = await Promise.all([
+  tools.shell("ls -1 /app/learnings"),
+  tools.shell("ls -1 /app/wiki/skills"),
+]);
+return {{
+  learnings: learningFiles.completeness === "inline"
+    ? learningFiles.value.stdout.trim().split("\\n").filter(Boolean)
+    : learningFiles,
+  skillGuides: skillFiles.completeness === "inline"
+    ? skillFiles.value.stdout.trim().split("\\n").filter(Boolean)
+    : skillFiles,
+}};
 ```
 
 Use targeted case-insensitive searches when the filename is uncertain. Do not
@@ -513,28 +581,52 @@ state.
 ```ts
 const scoredSkill = "{SCORED_SKILL_TOKEN}";
 const skillSlug = "{SCORED_SKILL_SLUG_TOKEN}";
-const [knowledgeIndex, api, skillGuide] = await Promise.all([
-  tools.shell("ls -1 /app/learnings /app/wiki/skills"),
+const [learningIndex, skillIndex, api] = await Promise.all([
+  tools.shell("ls -1 /app/learnings"),
+  tools.shell("ls -1 /app/wiki/skills"),
   tools.readFile("/app/sdk/API.md", {{ startLine: 1, endLine: 579 }}),
-  tools.readFile(`/app/wiki/skills/${{skillSlug}}.md`, {{
-    startLine: 1,
-    endLine: 400,
-  }}),
 ]);
-const indexText = knowledgeIndex.completeness === "inline"
-  ? knowledgeIndex.value.stdout
-  : "";
-const matchingLearning = indexText.split("\\n").includes(`${{skillSlug}}.md`)
-  ? await tools.readFile(`/app/learnings/${{skillSlug}}.md`, {{
-      startLine: 1,
-      endLine: 400,
-    }})
-  : null;
+const names = (result: typeof learningIndex) =>
+  result.completeness === "inline"
+    ? result.value.stdout.trim().split("\\n").filter(Boolean)
+    : [];
+const optionalRead = async (path: string) => {{
+  try {{
+    return {{
+      path,
+      status: "read" as const,
+      result: await tools.readFile(path, {{ startLine: 1, endLine: 400 }}),
+    }};
+  }} catch (error) {{
+    return {{
+      path,
+      status: "unavailable" as const,
+      error: error instanceof Error ? error.message : String(error),
+    }};
+  }}
+}};
+const learningFiles = names(learningIndex);
+const skillFiles = names(skillIndex);
+const skillPath = `/app/wiki/skills/${{skillSlug}}.md`;
+const learningPath = `/app/learnings/${{skillSlug}}.md`;
+const [skillGuide, matchingLearning] = await Promise.all([
+  skillFiles.includes(`${{skillSlug}}.md`)
+    ? optionalRead(skillPath)
+    : Promise.resolve({{ path: skillPath, status: "absent" as const }}),
+  learningFiles.includes(`${{skillSlug}}.md`)
+    ? optionalRead(learningPath)
+    : Promise.resolve({{ path: learningPath, status: "absent" as const }}),
+]);
 const game = rs.getState();
 const progress = {{
   skill: scoredSkill,
   phase: "discovery",
   xp: rs.getSkillXp(scoredSkill) ?? null,
+  confirmedFacts: [],
+  rejectedStrategies: [],
+  activeStrategy: null,
+  blocker: null,
+  nextHypothesis: "select one executable strategy from the API, guide, and live state",
   inventory: rs.getInventory(),
   liveState: inspect(game, {{
     depth: 4,
@@ -544,19 +636,37 @@ const progress = {{
   }}),
 }};
 await state.set("runebench.progress", progress);
-return {{ knowledgeIndex, api, skillGuide, matchingLearning, progress }};
+return {{
+  knowledgeIndex: {{ learningFiles, skillFiles }},
+  api,
+  skillGuide,
+  matchingLearning,
+  progress,
+}};
 ```
 
 If the exact learning filename is absent, use the returned index to select at
 most one clearly relevant upstream learning in the next experiment cell. Do
-not repeatedly search API or knowledge files after this discovery result.
+not repeatedly search API or knowledge files after this discovery result. The
+optional document records explicitly report `read`, `absent`, or `unavailable`;
+an absent learning is normal, while an unavailable indexed file is evidence to
+use the other retained sources rather than rerun the whole discovery cell.
+Before acting, reduce the sources into an executable pipeline: required inputs,
+how to acquire them, the target or station, the exact `rs` or `bot` call, and
+the live-state or metric transition that proves the action worked.
 
 ## Measured experiments
 
 Use one short action to validate a strategy, then use
 `runMeasuredActionLoop` for repeated actions. It preserves the 250 ms minimum
-failure backoff and returns compact counts, nested failure details, elapsed
-time, and measured XP before/after without returning every attempt.
+failure backoff, stops after eight consecutive failures by default, and returns
+exactly `requested`, `attempted`, `accepted`, `succeeded`, `failed`,
+`reportedFailures`, `invalidResults`, `threw`, `failureRate`, `stopReason`,
+`elapsedMs`, `metric`, and `lastFailure` without returning every attempt. Only
+an object with `success: true` is accepted; explicit false results, thrown
+errors, missing booleans, `undefined`, and malformed results back off and count
+as failures. Accepted actions still do not prove a kill, loot, inventory
+transition, scored XP, or rate improvement. `metric.delta` is the verification.
 
 ```ts
 return await (async () => {{
@@ -565,6 +675,7 @@ return await (async () => {{
     iterations: 20,
     minBackoffMs: 250,
     maxBackoffMs: 5_000,
+    maxConsecutiveFailures: 8,
     successDelayMs: 0,
     action: () => bot.chopTree(),
     measure: () => rs.getSkillXp("{SCORED_SKILL_TOKEN}") ?? 0,
@@ -575,7 +686,19 @@ return await (async () => {{
   const progress = {{
     skill: "{SCORED_SKILL_TOKEN}",
     phase: report.metric.delta > 0 ? "productive" : "diagnose",
-    strategy,
+    confirmedFacts: report.metric.delta > 0
+      ? [`${{strategy}} produced measured progress`]
+      : [],
+    rejectedStrategies: report.metric.delta > 0
+      ? []
+      : [{{ strategy, evidence: report }}],
+    activeStrategy: report.metric.delta > 0 ? strategy : null,
+    blocker: report.metric.delta > 0
+      ? null
+      : report.lastFailure ?? "action was accepted without measured progress",
+    nextHypothesis: report.metric.delta > 0
+      ? "compare the official peak with another viable strategy or exploit"
+      : "change one prerequisite, target, receiver, or route before retrying",
     report,
     tracker: rate.completeness === "inline" ? rate.value.stdout.trim() : rate,
   }};
@@ -586,17 +709,24 @@ return await (async () => {{
 
 `runebench.progress` is durable and is included in later model context even
 after detailed cell observations age out. Update it after each materially
-different strategy. A successful helper return is not proof of task progress:
-only positive scored-skill XP and tracker evidence are progress. If XP delta is
-zero, diagnose the compact failure and live state, change one assumption, and
-run a different bounded experiment.
+different strategy. Keep `confirmedFacts`, `rejectedStrategies`,
+`activeStrategy`, `blocker`, and `nextHypothesis` compact and factual. Never
+label an item raw, a target available, a station usable, or a route productive
+without current inventory/state or measured evidence. A successful helper
+return is not proof of task progress: only the phase-relevant state transition,
+positive scored-skill XP, and tracker evidence are progress.
 
 Start with one short action and return its small result. Treat a returned
 `{{ success: false, ... }}` as a failure even though it did not throw. Every
 repeated strategy must use `runActionLoop`, which applies bounded exponential
 backoff to false results and thrown errors. Inspect failed messages and change
-the strategy instead of hot-looping an unavailable target. The scored horizon
-is already running: do not spend opening turns enumerating object surfaces or
+the strategy instead of hot-looping an unavailable target. Retire a strategy
+after two measured zero-progress experiments with the same prerequisites and
+target, after its official peak fails to improve on two checks, or when more
+than 25 percent of attempts fail. Record that evidence in
+`rejectedStrategies`; do not retry it until a named prerequisite, target,
+receiver, route, or game-state assumption changes. The scored horizon is
+already running: do not spend opening turns enumerating object surfaces or
 repeating unchanged documentation searches. Cell results must be JSON-safe:
 replace optional `undefined` fields with `?? null` or omit them.
 
@@ -611,11 +741,14 @@ Write treatment scripts only under `{TRAINER_DIR}`. Measure after each strategy
 with the exact `TRACKING_FILE={TRACKING_FILE} bun ... check_xp_rate.ts <Skill>`
 command stated in the task.
 
-Once a measured loop produces non-zero XP, prefer fewer, longer bounded
-foreground loops and fewer model decisions. Reconsider the strategy only when
-the measured rate stalls, the action begins failing, or stronger evidence
-justifies a change. Do not alternate one short foreground action with one model
-call after proving a repeatable strategy.
+The official peak rate, not cumulative XP, selects the strategy. Before a
+foreground commitment longer than 60 seconds, compare at least two viable
+methods, targets, or supply routes when the guide and live state expose them.
+Once a measured loop improves the official peak with an acceptable failure
+rate, prefer fewer bounded foreground loops and fewer model decisions. Check
+the peak at least once per minute and reconsider when it stalls or failures
+rise. Do not alternate one short foreground action with one model call after
+proving a repeatable strategy.
 
 A managed process is optional rather than the default next step. Use one only
 when pauses during model decisions materially prevent sustained training. If
@@ -628,6 +761,14 @@ calling `sdk.processes.start`, and release the trainer's unique controller in
 Never use `command &`, `nohup`, `/tmp`, or another unmanaged process. Never
 start a trainer while the REPL controller claim is live. A failed controller
 claim is a lifecycle error to fix, not permission to bypass the wrapper.
+
+Use the authoritative `deadline.remainingMs` supplied on every model step.
+Never start work expected to outlive it. With at most 90 seconds remaining,
+stop exploration and managed trainers, inspect the official tracker, and keep
+only a bounded final action if scored XP is still zero. Once the final
+60-second gate window opens, call `finish` with `status: "succeeded"` only when
+the tracker proves positive scored-skill XP; otherwise keep any last attempt
+short enough for the absolute deadline to end the run truthfully.
 """.strip()
 
 

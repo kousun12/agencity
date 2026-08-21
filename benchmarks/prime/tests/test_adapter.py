@@ -16,6 +16,7 @@ from agencity_verifiers.harness import (
     _agencity_model,
     _endpoint_origin,
     _provider_environment,
+    _trace_result,
 )
 from agencity_verifiers.result import parse_run_result
 
@@ -58,10 +59,20 @@ class ResultTests(unittest.TestCase):
                 status="budget_exceeded",
                 exitCode=5,
                 final=None,
+                reason="Absolute deadline reached",
             ),
             5,
         )
         self.assertEqual(expired.status, "budget_exceeded")
+        self.assertEqual(expired.reason, "Absolute deadline reached")
+        self.assertEqual(
+            _trace_result(expired)["reason"],
+            "Absolute deadline reached",
+        )
+
+    def test_rejects_non_string_terminal_reason(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reason must be a string"):
+            parse_run_result(encoded_result(reason={"unexpected": True}), 0)
 
     def test_failure_diagnostics_are_bounded_and_scrub_known_secrets(self) -> None:
         secret = "intercept-secret-value"

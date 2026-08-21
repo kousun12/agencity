@@ -505,6 +505,7 @@ def _trace_result(result) -> dict[str, object]:
         "exit_code": result.value["exitCode"],
         "steps": result.value["steps"],
         "final": result.final,
+        "reason": result.reason,
     }
 
 

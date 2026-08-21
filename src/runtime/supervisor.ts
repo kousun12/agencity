@@ -2342,10 +2342,10 @@ function acceptanceCrashAfterCellCommit(cellId: string): void {
   process.exit(86);
 }
 
-function acceptanceAgentRunMaxSteps(): number {
-  if (process.env.AGENCITY_ACCEPTANCE !== "1") return 128;
+function acceptanceAgentRunMaxSteps(): number | undefined {
+  if (process.env.AGENCITY_ACCEPTANCE !== "1") return undefined;
   const raw = process.env.AGENCITY_ACCEPTANCE_MAX_RUN_STEPS;
-  if (raw === undefined) return 128;
+  if (raw === undefined) return undefined;
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < 1 || value > 128) throw new ValidationError("AGENCITY_ACCEPTANCE_MAX_RUN_STEPS must be an integer from 1 to 128");
   return value;

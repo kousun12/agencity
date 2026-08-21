@@ -27,6 +27,7 @@ class AgencitySmokeTask(vf.Task[AgencitySmokeData]):
             "status": result.status,
             "steps": result.value["steps"],
             "final": result.final,
+            "reason": result.reason,
         }
         return float(
             result.status == "succeeded"

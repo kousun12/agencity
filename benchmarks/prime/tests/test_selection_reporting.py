@@ -113,6 +113,7 @@ def trace(
     *,
     reward: float | None,
     status: str = "succeeded",
+    reason: str | None = None,
     error_type: str | None = None,
 ) -> dict:
     rewards = (
@@ -144,7 +145,10 @@ def trace(
         },
         "task": {"data": {"selection_id": task_id}},
         "info": {
-            "agencity": {"status": status},
+            "agencity": {
+                "status": status,
+                **({"reason": reason} if reason is not None else {}),
+            },
             "benchmark_provenance": {
                 "catalog_sha256": "c" * 64,
                 "selected_ids": ["pass", "zero"],
@@ -174,7 +178,14 @@ class ReportingTests(unittest.TestCase):
             {"errors": [], "traces": [trace("zero", reward=0)]},
             {
                 "errors": [],
-                "traces": [trace("failed", reward=0, status="failed")],
+                "traces": [
+                    trace(
+                        "failed",
+                        reward=0,
+                        status="failed",
+                        reason="Agent run stopped",
+                    )
+                ],
             },
             {
                 "errors": [],
@@ -224,6 +235,10 @@ class ReportingTests(unittest.TestCase):
         )
         self.assertEqual(summary["usage"]["model_calls"], 8)
         self.assertAlmostEqual(summary["usage"]["provider_reported_cost"], 0.08)
+        failed_task = next(
+            task for task in summary["tasks"] if task["task_id"] == "failed"
+        )
+        self.assertEqual(failed_task["terminal_reason"], "Agent run stopped")
         self.assertEqual(len(summary["run_provenance"]), 1)
         self.assertEqual(summary["run_provenance"][0]["model"], "openai/example")
         self.assertNotIn("secret", str(summary["run_provenance"]))

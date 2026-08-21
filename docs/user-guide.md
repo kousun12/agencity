@@ -90,7 +90,7 @@ These are declaration-only provider tools. They do not execute at the provider a
 
 The TypeScript console, workspace files, and shell operations are the general mechanism for different task domains. Agencity does not add a dedicated core tool for every specialized workflow; recurring specializations can be retained as inspectable skills.
 
-Every autonomous response must contain exactly one valid call from the fixed set. Provider narration is diagnostic-only. Agencity does not search it for JSON or code and has no text-JSON or TypeScript fallback. If validation rejects a response, no submitted code executes; the model receives one bounded correction step with the exact error. A second consecutive rejection ends the run. Normal budget and step limits also apply to the correction.
+Every autonomous response must contain exactly one valid call from the fixed set. Provider narration is diagnostic-only. Agencity does not search it for JSON or code and has no text-JSON or TypeScript fallback. If validation rejects a response, no submitted code executes; the model receives one bounded correction step with the exact error. A second consecutive rejection ends the run. Configured budgets and absolute deadlines also apply to the correction. Ordinary runs have no implicit model-step ceiling.
 
 If information is missing, `finish` returns a blocked response containing the question. Your later message starts an ordinary new run on the same branch; there is no separate input-response lifecycle.
 

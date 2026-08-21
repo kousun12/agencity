@@ -54,6 +54,7 @@ def summarize_records(
                     "outcome": outcome,
                     "reward": None,
                     "terminal_status": None,
+                    "terminal_reason": None,
                 }
             )
             continue
@@ -76,6 +77,7 @@ def summarize_records(
         )
         reward = _trace_reward(trace)
         terminal = _terminal_status(trace)
+        terminal_reason = _terminal_reason(trace)
         outcome = _classify(episode, trace, terminal, reward)
         outcomes[outcome] += 1
         if reward is not None:
@@ -121,6 +123,7 @@ def summarize_records(
                 "outcome": outcome,
                 "reward": reward,
                 "terminal_status": terminal,
+                "terminal_reason": terminal_reason,
             }
         )
 
@@ -283,6 +286,13 @@ def _terminal_status(trace: dict[str, Any]) -> str | None:
     agencity = info.get("agencity") if isinstance(info, dict) else None
     status = agencity.get("status") if isinstance(agencity, dict) else None
     return status if isinstance(status, str) else None
+
+
+def _terminal_reason(trace: dict[str, Any]) -> str | None:
+    info = trace.get("info")
+    agencity = info.get("agencity") if isinstance(info, dict) else None
+    reason = agencity.get("reason") if isinstance(agencity, dict) else None
+    return reason if isinstance(reason, str) else None
 
 
 def _integer(value: object) -> int:

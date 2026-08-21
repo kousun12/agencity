@@ -445,12 +445,17 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
             "exitCode": 1,
             "steps": 9,
             "final": None,
+            "reason": "Unable to produce a supported label",
         }
         runtime = MappingRuntime({RESULT_PATH: json.dumps(result).encode()})
         trace = SimpleNamespace(info={})
         reward = await self.task().correct(trace, runtime)
         self.assertEqual(reward, 0.0)
         self.assertIsNone(trace.info["oolong"]["answer_source"])
+        self.assertEqual(
+            trace.info["agencity"]["reason"],
+            "Unable to produce a supported label",
+        )
 
     async def test_scores_portable_retained_result_without_artifact(self) -> None:
         runtime = MappingRuntime({ANSWER_PATH: b"Sports\n"})

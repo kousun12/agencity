@@ -239,7 +239,7 @@ export class AgentRunService {
     readonly outbox: OutboxRunner,
     readonly goals: GoalService,
     readonly executeCell: ExecuteCell,
-    readonly maxSteps = 128,
+    readonly maxSteps?: number,
     readonly compactions?: CompactionService,
     readonly modelExecutor?: ModelExecutor,
     readonly profiles: AgentProfileService = new AgentProfileService(storage),
@@ -247,7 +247,10 @@ export class AgentRunService {
       COLD_REPL_NAMESPACE,
     readonly clock: () => number = Date.now,
   ) {
-    if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) throw new ValidationError("Agent run maxSteps must be positive");
+    if (maxSteps !== undefined &&
+        (!Number.isSafeInteger(maxSteps) || maxSteps < 1)) {
+      throw new ValidationError("Agent run maxSteps must be positive when configured");
+    }
     this.#history = new IncrementalBranchHistory(storage);
   }
 
@@ -552,7 +555,7 @@ export class AgentRunService {
         await this.#terminal(sessionId, branchId, run, "unknown", `Effect ${unknown.id} has an unknown outcome: ${unknown.error ?? "manual reconciliation required"}`);
         continue;
       }
-      if (run.steps.length >= this.maxSteps) {
+      if (this.maxSteps !== undefined && run.steps.length >= this.maxSteps) {
         await this.#terminal(sessionId, branchId, run, "budget_exceeded", `Agent run step limit ${this.maxSteps} reached`);
         continue;
       }
@@ -2123,9 +2126,11 @@ export function agentProviderContext(
   }
   const { repositoryInstructions: _repositoryInstructions, ...providerDurable } = durable;
   const durableContext = Object.fromEntries([
-    "runtime", "agentProfile", "userProfile", "session", "budget", "goal", "tasks", "mailbox",
-    "terminalNotices", "recursiveModels", "documents", "inputSets", "heartbeats", "schedules", "wakes", "activeRuns",
-    "harness", "compactions", "workingValues", "artifacts", "queryHints",
+    "runtime", "agentProfile", "userProfile", "session", "goal", "tasks",
+    "documents", "inputSets", "harness", "compactions", "queryHints",
+    "budget", "mailbox", "terminalNotices", "recursiveModels",
+    "heartbeats", "schedules", "wakes", "activeRuns", "workingValues",
+    "artifacts",
   ].filter((key) => durable[key] !== undefined).map((key) => [key, durable[key]]));
   const correctingRejectedAction = observations.some((observation) =>
     observation.type === "AgentRunActionRejected" ||

@@ -31,6 +31,11 @@ class RunResult:
         value = self.value.get("final")
         return value if isinstance(value, str) else None
 
+    @property
+    def reason(self) -> str | None:
+        value = self.value.get("reason")
+        return value if isinstance(value, str) else None
+
 
 def parse_run_result(stdout: str, process_exit_code: int) -> RunResult:
     if len(stdout.encode("utf-8")) > MAX_RESULT_BYTES:
@@ -61,5 +66,7 @@ def parse_run_result(stdout: str, process_exit_code: int) -> RunResult:
         raise ValueError("Agencity result steps must be a non-negative integer")
     if status == "succeeded" and not isinstance(value.get("final"), str):
         raise ValueError("A successful Agencity result requires a final string")
+    if "reason" in value and not isinstance(value["reason"], str):
+        raise ValueError("Agencity result reason must be a string when present")
 
     return RunResult(value=value)

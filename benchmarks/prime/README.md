@@ -143,11 +143,16 @@ The `agencity-runebench-repl-v1` treatment replaces the task prompt's MCP
 wrapper with one staged controller around the same image-owned TypeScript SDK
 inside Agencity's persistent Bun console. A process-identity claim permits one
 control owner, release confirms disconnection before trainer handoff, repeated
-actions treat false results as failures with bounded backoff, and the measured
-loop helper reduces a batch to counts, the latest failure, elapsed time, and XP
-delta. Root instructions distinguish the high-level `bot` receiver from the
-low-level `rs` receiver, batch one initial API/learning/wiki/live-state
-discovery cell, and keep compact strategy evidence in the durable
+actions treat every non-explicit success and throw as a failure with bounded
+backoff, and the measured
+loop helper accepts only explicit `{ success: true }`, separates accepted calls
+from measured progress, and reduces a batch to exact reported-failure,
+invalid-result, thrown, failure-rate, latest-failure, elapsed-time, and metric
+delta fields.
+Root instructions distinguish the executable API, optional upstream learnings,
+and factual wiki; list learning and skill files independently; translate the
+high-level `bot` and low-level `rs` receivers; and keep confirmed facts,
+rejected strategies, blockers, and next hypotheses in the durable
 `runebench.progress` working value. Managed trainers remain optional for loops
 whose progress would materially stop during provider calls.
 The treatment guidance is not duplicated in the task prompt. The active
@@ -155,6 +160,8 @@ tracker path is supplied explicitly. Successful `finish` is gate-checked
 against positive scored-skill XP and a tracker sample near the official
 horizon; the unchanged Harbor verifier remains authoritative. RuneBench's
 benign local `password: "test"` option remains inside the staged controller.
+Agencity has no implicit production run-step ceiling, so the official task
+deadline remains the primary bound.
 The official task package, save fixture,
 time horizon, sampling cadence, game image, and Harbor verifier remain pinned.
 The treatment raises the pinned package's 4 GiB memory cap to 8 GiB, matching
@@ -402,7 +409,9 @@ The report separates passes, valid zeros, partial rewards, agent terminal
 failures, provider failures, scorer/infrastructure errors, skips, cancellations,
 unknowns, and catalog incompatibility counts. Reward mean uses only officially
 scored tasks and states its denominator. Infrastructure errors are not silently
-averaged as zero. Provider-supplied calls, tokens, timing, and cost are
+averaged as zero. Per-task results retain Agencity's semantic terminal status
+and reason rather than relying on the harness process's generic
+`agent_completed` stop. Provider-supplied calls, tokens, timing, and cost are
 aggregated when present. Summary schema v2 emits `agent_terminal_failure`;
 the misleading v1 `harness_terminal_failure` name is not retained.
 

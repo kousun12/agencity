@@ -414,6 +414,20 @@ const attempts = await runActionLoop({
   maxBackoffMs: 250,
   action: async () => ({ success: false, message: "No target found" }),
 });
+const limited = await runActionLoop({
+  iterations: 20,
+  minBackoffMs: 250,
+  maxBackoffMs: 250,
+  maxConsecutiveFailures: 3,
+  action: async () => ({ success: false, message: "Still unavailable" }),
+});
+const invalid = await runActionLoop({
+  iterations: 20,
+  minBackoffMs: 250,
+  maxBackoffMs: 250,
+  maxConsecutiveFailures: 3,
+  action: async () => ({}),
+});
 await first.release();
 const successor = await acquireControllerLease("successor");
 await successor.release();
@@ -421,6 +435,12 @@ console.log(JSON.stringify({
   blocked,
   elapsedMs: Date.now() - started,
   failures: attempts.filter((attempt) => !attempt.ok).length,
+  limitedAttempts: limited.length,
+  limitedFailures: limited.filter((attempt) => !attempt.ok).length,
+  invalidAttempts: invalid.length,
+  invalidKinds: invalid
+    .filter((attempt) => !attempt.ok)
+    .map((attempt) => attempt.kind),
 }));
 """
             test_script.write_text(source, encoding="utf-8")
@@ -453,7 +473,14 @@ console.log(JSON.stringify({
         result = json.loads(completed.stdout.strip().splitlines()[-1])
         self.assertTrue(result["blocked"])
         self.assertEqual(result["failures"], 2)
-        self.assertGreaterEqual(result["elapsedMs"], 450)
+        self.assertEqual(result["limitedAttempts"], 3)
+        self.assertEqual(result["limitedFailures"], 3)
+        self.assertEqual(result["invalidAttempts"], 3)
+        self.assertEqual(
+            result["invalidKinds"],
+            ["invalid_result", "invalid_result", "invalid_result"],
+        )
+        self.assertGreaterEqual(result["elapsedMs"], 1_200)
 
     def test_documented_rate_command_reads_active_tracker_file(self) -> None:
         tracker = {

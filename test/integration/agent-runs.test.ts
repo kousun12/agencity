@@ -558,7 +558,17 @@ async function runContextSensitiveScenario(
     .findIndex((_, index) =>
       dynamicStepContents.some((value) =>
         value.codePointAt(index) !== dynamicStepContents[0]!.codePointAt(index)));
-  expect(reusableDynamicPrefixBytes).toBeGreaterThan(256);
+  expect(reusableDynamicPrefixBytes).toBeGreaterThan(1_500);
+  const firstEnvelope = JSON.parse(
+    dynamicStepContents[0]!.slice("AGENCITY DURABLE RUN STEP\n".length),
+  ) as { durableContext: Record<string, JsonValue> };
+  const durableKeys = Object.keys(firstEnvelope.durableContext);
+  expect(durableKeys.indexOf("harness")).toBeLessThan(
+    durableKeys.indexOf("budget"),
+  );
+  expect(durableKeys.indexOf("messages")).toBeLessThan(
+    durableKeys.indexOf("budget"),
+  );
   expect(provider.decisions.map((item) => item.type))
     .toEqual(["typescript", "typescript", "final"]);
   expect(await Bun.file(`${temp.workspaceRoot}/context-stage.txt`).text())
@@ -594,6 +604,15 @@ async function runContextSensitiveScenario(
 }
 
 describe("autonomous durable agent runs", () => {
+  test("has no implicit production step limit", async () => {
+    const { supervisor } = await fixture([]);
+    try {
+      expect(supervisor.runs.maxSteps).toBeUndefined();
+    } finally {
+      await supervisor.close();
+    }
+  });
+
   test("keeps a compact working-value checkpoint after its source step leaves recent trajectory", async () => {
     const script: AgentAction[] = [
       action({

@@ -155,22 +155,30 @@ Agencity reads the equivalent pinned `/app/sdk/API.md` file. The learning and
 wiki directories are image-owned files rather than MCP resources. The harness
 does not mount external documentation that is absent from the pinned image.
 
-The two game-knowledge sources serve different purposes:
+The API and two game-knowledge sources serve different purposes:
 
+- `/app/sdk/API.md` is the executable contract for receiver ownership, method
+  names, argument shapes, and result types. `BotSDK` methods use the treatment's
+  `rs` binding and `BotActions` methods use `bot`.
 - `/app/learnings/` contains upstream operational notes, tested interaction
   patterns, known obstacles, and skill examples. These are model-facing
   `rs-sdk` materials, not Agencity-generated memories and not artifacts learned
-  from Agencity benchmark runs.
+  from Agencity benchmark runs. They are optional by skill and may call the
+  upstream game client `sdk`; treatment code translates those references through
+  the API to `rs` or `bot` because Agencity reserves `sdk`.
 - `/app/wiki/skills/` describes training methods and requirements. Its Markdown
   links lead to factual item, NPC, shop, and quest pages under the corresponding
-  wiki directories.
+  wiki directories. Wiki pages describe game knowledge, not callable methods or
+  current world state.
 
-Treatment guidance tells the model to inspect likely learning and skill files
-in one initial discovery cell, follow focused wiki links or searches for
-prerequisites and acquisition, and verify the result against live game state.
-That cell may read the pinned API once together with the relevant skill page
-and matching learning. The treatment does not inline those documents or the
-wiki corpus into every provider call.
+Treatment guidance lists learning and skill-guide directories independently,
+then reads only exact filenames present in each source. A wiki filename cannot
+be mistaken for a learning filename, and a missing optional learning does not
+fail the discovery cell. That cell may read the pinned API once together with
+the relevant skill page and matching learning, then reduces the sources into
+inputs, acquisition, target or station, exact receiver and method, and a
+measurable success condition. The treatment does not inline those documents or
+the wiki corpus into every provider call.
 
 ### Treatment prompting
 
@@ -187,10 +195,11 @@ tells the model to:
 - use a compact direct-SDK quick start that preserves the official interface
   examples under the translated `bot` and `rs` names, plus the exact bounded
   file and shell result shapes for finding additional methods;
-- distinguish upstream operational learnings from the broader extracted wiki,
-  batch the filename index, pinned API, scored-skill page, matching learning,
-  inventory, XP, and bounded live state into one initial discovery cell, and
-  navigate to at most the focused item, NPC, shop, or quest facts needed next;
+- distinguish the executable API, optional upstream operational learnings, and
+  factual extracted wiki; list learning and skill filenames independently;
+  batch the pinned API, scored-skill page, matching learning, inventory, XP, and
+  bounded live state into one initial discovery cell; and navigate to at most
+  the focused item, NPC, shop, or quest facts needed next;
 - treat documentation as guidance, verify it against live `rs` state, and use
   the pinned SDK API as the authority for exact callable signatures;
 - acquire once, then reuse those live objects while the exact branch REPL epoch
@@ -198,23 +207,32 @@ tells the model to:
 - begin with one short action and a small returned state summary;
 - treat a returned `{ success: false, message }` as failure and run repeated
   actions only through the staged bounded-backoff helper;
-- use `runMeasuredActionLoop` to reduce each repeated batch into counts, the
-  latest nested failure, elapsed time, and exact scored-skill XP delta;
-- write the current strategy, compact measured result, and tracker output to
-  the replaceable durable `runebench.progress` working value so progress remains
-  visible after the eight-action trajectory window has advanced;
-- lengthen only a positive-XP measured loop and change one assumption when XP
-  remains unchanged instead of hot-looping an unavailable target;
+- use `runMeasuredActionLoop` to reduce each repeated batch into exact attempted,
+  accepted, succeeded, reported-failure, invalid-result, thrown, failure-rate,
+  latest-failure, elapsed-time, and metric-delta fields; accept only an explicit
+  `{ success: true }`; stop after eight consecutive failures by default; and
+  treat command acceptance as distinct from verified game progress;
+- write confirmed facts, rejected strategies, active strategy, current blocker,
+  next hypothesis, compact measured result, and tracker output to the
+  replaceable durable `runebench.progress` working value;
+- retire a strategy after two unchanged measured experiments, two official-peak
+  checks without improvement, or a failure rate above 25 percent unless a named
+  prerequisite, target, receiver, route, or world-state assumption changes;
 - avoid opening-turn object enumeration and repeated unchanged documentation
   searches while the scored horizon is running;
 - consult SDK, learning, and wiki files on demand rather than loading all of
   them into context or repeating unchanged searches;
-- measure XP rate through the active tracker path after each strategy;
+- select strategies by official peak rate rather than cumulative XP, compare
+  alternatives before a foreground commitment longer than one minute, and
+  measure through the active tracker path at least once per minute;
 - keep only reusable connections, imported helpers, and compact summaries at
   REPL top level while scoping attempt arrays and complete tool payloads inside
   the cell that consumes them;
-- use fewer, longer bounded foreground loops after measuring a non-zero
-  strategy instead of alternating short actions with provider calls; and
+- use fewer, bounded foreground loops after measuring an improving strategy
+  instead of alternating short actions with provider calls;
+- use authoritative remaining-time telemetry, stop exploration with 90 seconds
+  remaining, and reserve the final gate window for tracker verification and a
+  typed successful `finish` only when scored XP is positive; and
 - use a managed trainer only when provider-call pauses materially prevent
   sustained training. If used, write it below
   `/app/agencity-runebench/trainers/`, release and confirm the REPL controller
@@ -297,8 +315,10 @@ fresh-profile RuneBench treatment.
 The committed configs use native OpenAI, `xhigh` reasoning, one rollout per
 selected task, up to 5,000 model turns, and a 128,000-token per-response
 ceiling. They deliberately omit cumulative input, output, and total-token
-ceilings. The official 15- or 30-minute task horizon remains authoritative, so
-elapsed task time normally terminates the rollout before the turn allowance.
+ceilings. Agencity applies no implicit production run-step ceiling; the
+Verifiers turn allowance is a permissive outer bound. The official 15- or
+30-minute task horizon remains authoritative, so elapsed task time normally
+terminates the rollout before the turn allowance.
 This configuration does not bound provider spend; review the model and route
 before any paid run.
 
@@ -617,9 +637,11 @@ uv run --locked python -m agencity_verifiers.reporting \
 
 The summary distinguishes official scores, valid zeroes, partial rewards,
 agent failures, provider failures, scorer or infrastructure errors,
-cancellations, unknowns, skips, and incompatibilities. A displayed reward of
-zero is not a valid RuneBench score when the trace reports a harness, cleanup,
-or scorer error.
+cancellations, unknowns, skips, and incompatibilities. Per-task records retain
+Agencity's semantic terminal status and exact bounded terminal reason; the
+generic Verifiers `agent_completed` stop only means the harness process exited
+normally. A displayed reward of zero is not a valid RuneBench score when the
+trace reports a harness, cleanup, or scorer error.
 
 For the full leaderboard-comparable run, preflight and report against the exact
 16-task selection:

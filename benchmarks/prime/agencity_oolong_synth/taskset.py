@@ -224,6 +224,7 @@ class OolongSynthTask(vf.Task[OolongSynthData]):
                 "status": status,
                 "steps": steps,
                 "final": final,
+                "reason": result.reason,
             }
         trace.info["benchmark_provenance"] = {
             "schema": "agencity.benchmark-task-provenance.v1",

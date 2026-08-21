@@ -218,15 +218,10 @@ export class ContextMaterializer {
       userProfile: { preferences: profilePreferences, globalSkills: profileSkills },
       ...(repositoryInstructions === undefined ? {} : { repositoryInstructions }),
       session: { id:sessionId,branchId,status:state.status,model:state.model,parentSessionId:state.parentSessionId,parentBranchId:state.parentBranchId,rootSessionId:state.rootSessionId,depth:state.depth,taskId:state.taskId },
-      budget: state.budget,
       goal: Object.values(state.goals).find((goal) => !["completed","failed","cancelled"].includes(goal.status)) ?? null,
-      tasks:Object.values(state.tasks),mailbox,terminalNotices:Object.values(state.terminalNotices),recursiveModels:recursiveModelContext(Object.values(state.recursiveModels)),
-      unknownEffectReconciliations:Object.values(state.effectReconciliations),
+      tasks:Object.values(state.tasks),
       documents:Object.values(state.documents).map((document)=>({id:document.id,name:document.name,mediaType:document.mediaType,size:document.size,digest:document.digest,chunkCount:document.chunkCount})),
-      inputSets:Object.values(state.inputSets),heartbeats:Object.values(state.heartbeats),schedules:Object.values(state.schedules),wakes:Object.values(state.wakes),
-      activeRuns:Object.values(state.agentRuns)
-        .filter((run)=>!["succeeded","blocked","failed","cancelled","budget_exceeded","unknown"].includes(run.status))
-        .map(boundedActiveRunProjection),
+      inputSets:Object.values(state.inputSets),
       harness: {
         promptNotes: promptNotes.map(publicHarness),
         memories: memories.map(publicHarness),
@@ -235,9 +230,21 @@ export class ContextMaterializer {
       },
       compactions,
       messages:messages.map((message)=>({role:message.role,content:message.content,eventId:message.eventId,...(message.mailbox === undefined ? {} : { mailbox: message.mailbox })})),
-      workingValues:Object.values(state.workingValues).map((value)=>({name:value.name,version:value.version,value:value.value,eventId:value.eventId})),artifacts:Object.values(state.artifacts),
-      recentActivity:activity.map((event)=>({eventId:event.id,type:event.type,payload:event.payload})),
       queryHints:{history:"SELECT type, committed_at, payload_json FROM events WHERE session_id = ? ORDER BY sequence",largeRecords:"Resolve exact bounded bytes through sdk.artifacts.readRange(artifactId, start, end)",documents:"SELECT chunk_id, ordinal, content FROM document_chunks WHERE document_id = ? ORDER BY ordinal",mailbox:"SELECT * FROM mailbox_messages WHERE to_session_id = ? ORDER BY sent_at",memory:"Use Supervisor.memory.search; candidate generation is FTS5 and scope/status policy remains authoritative"},
+      budget: state.budget,
+      mailbox,
+      terminalNotices:Object.values(state.terminalNotices),
+      recursiveModels:recursiveModelContext(Object.values(state.recursiveModels)),
+      unknownEffectReconciliations:Object.values(state.effectReconciliations),
+      heartbeats:Object.values(state.heartbeats),
+      schedules:Object.values(state.schedules),
+      wakes:Object.values(state.wakes),
+      activeRuns:Object.values(state.agentRuns)
+        .filter((run)=>!["succeeded","blocked","failed","cancelled","budget_exceeded","unknown"].includes(run.status))
+        .map(boundedActiveRunProjection),
+      workingValues:Object.values(state.workingValues).map((value)=>({name:value.name,version:value.version,value:value.value,eventId:value.eventId})),
+      artifacts:Object.values(state.artifacts),
+      recentActivity:activity.map((event)=>({eventId:event.id,type:event.type,payload:event.payload})),
     })) as JsonValue;
     const context = options.transform ? options.transform(baseContext) : baseContext;
     const admission = options.providerInput
