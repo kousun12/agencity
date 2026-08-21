@@ -136,6 +136,8 @@ describe("observer browser assets", () => {
     expect(javascript).toContain('firstValue(item, ["sessionTitle"]');
     expect(javascript).toContain('firstValue(source, ["sessionTitle"]');
     expect(javascript).toContain('firstValue(titleSource, ["intentSummary"]');
+    expect(javascript).toContain('text(button, node.model, "node-meta")');
+    expect(javascript).not.toContain('text(button, node.branchName + " · depth " + node.depth, "node-meta")');
     expect(css).toContain("min-height: clamp(32rem, 68vh, 52rem)");
   });
 

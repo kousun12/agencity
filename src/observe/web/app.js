@@ -864,7 +864,6 @@
     button.dataset.activity = node.activity;
     button.setAttribute("aria-label", "Inspect " + boundedText(node.name, 120));
     text(button, node.name, "node-title");
-    text(button, node.branchName + " · depth " + node.depth, "node-meta");
     text(button, node.model, "node-meta");
     text(button, node.taskSummary || "No task summary", "node-task");
     if (node.latestRun?.currentAction) text(button, actionLabel(node.latestRun.currentAction), "node-action");
