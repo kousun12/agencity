@@ -140,9 +140,6 @@ export class SessionTitleService {
     });
     if (!events.some((event) => event.id === source.id)) return;
     const state = projectEvents(events);
-    if (Object.values(state.agentRuns).some((run) =>
-      !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]
-        .includes(run.status))) return;
     const requestId = titleRequestId(source.sessionId, source.id, force);
     const existing = state.sessionTitle.requests[requestId];
     if (existing) {
@@ -250,9 +247,6 @@ export class SessionTitleService {
     let state = projectEvents(await this.storage.loadEvents(sessionId, { branchId }));
     const request = state.sessionTitle.requests[requestId];
     if (!request || request.status === "resolved" || !request.effectId) return;
-    if (Object.values(state.agentRuns).some((run) =>
-      !["succeeded", "blocked", "failed", "cancelled", "budget_exceeded", "unknown"]
-        .includes(run.status))) return;
     await this.outbox.run(request.effectId);
     state = projectEvents(await this.storage.loadEvents(sessionId, { branchId }));
     const current = state.sessionTitle.requests[requestId];

@@ -352,7 +352,10 @@ describe("automatic maintained session titles", () => {
       recover: false,
     });
     try {
-      const session = await supervisor.createSession({ workspaceId: "echo-title" });
+      const session = await supervisor.createSession({
+        workspaceId: "echo-title",
+        sessionName: "New session 2026-08-21",
+      });
       await supervisor.appendMessage(session.sessionId, session.branchId, "user", "Inspect local state");
       const state = await titleState(supervisor, session.sessionId, session.branchId);
       expect(resolveSessionTitlePresentation(state, "Start new session", true))
@@ -361,6 +364,13 @@ describe("automatic maintained session titles", () => {
           source: "deterministic_fallback",
           verb: "Inspect",
         });
+      expect(resolveSessionTitlePresentation({
+        sessionName: state.sessionName ?? null,
+        messages: state.messages,
+      }, "Start new session", true)).toMatchObject({
+        text: "Inspect local state",
+        source: "deterministic_fallback",
+      });
       expect(Object.keys(state.sessionTitle.resolutions)).toHaveLength(0);
       expect(Object.keys(state.effects)).toHaveLength(0);
     } finally {

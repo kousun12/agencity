@@ -96,7 +96,9 @@ export function reduceAgentState(state: AgentState | undefined, event: AgentEven
     return {
       reducerVersion: REDUCER_VERSION, sessionId: event.sessionId, workspaceId: p.workspaceId, sessionName: p.sessionName ?? null,
       sessionTitle: {
-        mode: p.sessionName === undefined ? "automatic" : "manual",
+        mode: p.sessionName === undefined || /^New session \d{4}-\d{2}-\d{2}$/u.test(p.sessionName)
+          ? "automatic"
+          : "manual",
         latestRequestedSourceMessageCursor: null,
         appliedSourceMessageCursor: null,
         requests: {},

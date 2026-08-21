@@ -1,6 +1,6 @@
 # Event schemas (version 6)
 
-`events` is the canonical append-only history. The runtime accepts schema version 6 only and uses reducer version 24. This is an explicit pre-release reset boundary: workspaces containing schema version 1, 2, 3, 4, or 5 reject with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted. After release, payload evolution requires a new schema version and an explicit tested projection path.
+`events` is the canonical append-only history. The runtime accepts schema version 6 only and uses reducer version 25. This is an explicit pre-release reset boundary: workspaces containing schema version 1, 2, 3, 4, or 5 reject with reset guidance before product migration, row decoding, projection, synchronization ingestion, or recovery. They are not upcast or reinterpreted. After release, payload evolution requires a new schema version and an explicit tested projection path.
 
 ## Header
 

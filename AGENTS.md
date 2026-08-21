@@ -558,7 +558,7 @@ Physical owned-scope deletion is a separate, guarded data-control operation. Do 
 
 ### Event evolution is versioned
 
-Released event meanings are immutable. Before the first release, an architecture cutover may replace the accepted workspace schema and require local state reset instead of implementing compatibility. The current runtime accepts event schema version 6 only, uses reducer version 24, and rejects version-1/version-2/version-3/version-4/version-5 workspaces with reset guidance before migration, row decode, projection, sync ingestion, and recovery. This provider-transcript cutover is an explicit pre-release reset boundary. There is no general event-version registry or upcaster pipeline.
+Released event meanings are immutable. Before the first release, an architecture cutover may replace the accepted workspace schema and require local state reset instead of implementing compatibility. The current runtime accepts event schema version 6 only, uses reducer version 25, and rejects version-1/version-2/version-3/version-4/version-5 workspaces with reset guidance before migration, row decode, projection, sync ingestion, and recovery. This provider-transcript cutover is an explicit pre-release reset boundary. There is no general event-version registry or upcaster pipeline.
 
 After release, changing event meaning requires explicit version acceptance, deterministic projection/upcasting, retained-history fixtures, protocol compatibility tests, and updated event documentation. Pre-release cutovers must still fail closed before projection and must never silently reinterpret an older workspace.
 

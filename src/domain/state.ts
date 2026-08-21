@@ -12,7 +12,7 @@ import type { JsonValue } from "./json.ts";
 import type { AgentInvocationContract, AgentRunResultReference } from "./agent-invocation-contract.ts";
 import type { ReplNamespaceStatus } from "./repl-namespace.ts";
 
-export const REDUCER_VERSION = 24 as const;
+export const REDUCER_VERSION = 25 as const;
 
 export interface BranchState { readonly id: string; readonly parentBranchId: string | null; readonly forkCursor: string | null; readonly name: string | null; }
 export interface MessageState { readonly id: string; readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string; readonly eventId: string; readonly eventCursor: string; readonly schemaVersion: number; readonly modelCallId: string | null; readonly producer?: string; readonly idempotencyKey?: string | null; readonly mailbox?: { readonly mailboxMessageId: string; readonly fromSessionId: string; readonly relationship: FamilyRelationship; readonly taskId?: string; readonly artifactIds?: string[]; readonly receiptEventId: string }; }
